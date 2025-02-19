@@ -36,7 +36,7 @@ jobs:
 
           # Cross-compile the binary
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            go build -ldflags="-s -w" -o build_output/${output_name} .
+            go build -ldflags="-s -w -X main.version=$(git describe --tags)" -o build_output/${output_name} .
 
           # Copy userguide.md into the zip archive
           cp README.md build_output/README.md

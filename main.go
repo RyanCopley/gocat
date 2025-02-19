@@ -25,6 +25,8 @@ const (
 	fileEndPrefix   = "// --------- FILE END: "
 )
 
+var version string = "dev"
+
 // Global variables for exclusion filters.
 var excludePackages []string
 var excludeFiles []string
@@ -668,8 +670,10 @@ func splitInput(r io.Reader, outDir string) error {
 }
 
 // printGeneralHelp prints the general usage message.
+
 func printGeneralHelp() {
-	fmt.Printf(`Usage: %s <command> [options]
+    fmt.Printf(`gocat %s
+Usage: %s <command> [options]
 
 Commands:
   join    Join source files (and their internal module dependencies) into a single stream.
@@ -680,7 +684,7 @@ Commands:
 For detailed help on a command, run:
   %s help <command>
 
-`, "gocat", "gocat")
+`, version, "gocat", "gocat")
 }
 
 // printSubcommandHelp prints help for a specific subcommand.
