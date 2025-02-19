@@ -30,6 +30,16 @@ const (
 	fileEndPrefix   = "// --------- FILE END: "
 )
 
+const (
+	Reset  = "\033[0m"
+	Red    = "\033[31m"
+	Green  = "\033[32m"
+	Yellow = "\033[33m"
+	Blue   = "\033[34m"
+	Cyan   = "\033[36m"
+)
+
+
 var (
 	// version should be overridden at build time via ldflags (default "dev")
 	version string = "dev"
@@ -295,9 +305,9 @@ func checkForUpdates(moduleName string) {
 		return
 	}
 	if currentVer.LessThan(latestVer) {
-		fmt.Fprintf(os.Stderr, "Update available: version %s is available (you are using %s).\n", rel.TagName, version)
-		fmt.Fprintf(os.Stderr, "%s\n", rel.Body)
-		fmt.Fprintf(os.Stderr, "https://github.com/%s/%s/compare/%s...%s\n", repoOwner, repoName, version, rel.TagName)
+		fmt.Fprintf(os.Stderr, "%sUpdate available:%s version %s is available (you are using %s).\n", Green, Reset, rel.TagName, version)
+		fmt.Fprintf(os.Stderr, "%s%s%s\n", Cyan, rel.Body, Reset)
+		fmt.Fprintf(os.Stderr, "%shttps://github.com/%s/%s/compare/%s...%s%s\n", Yellow, repoOwner, repoName, version, rel.TagName, Reset)
 	}
 }
 
