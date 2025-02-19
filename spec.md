@@ -6,7 +6,7 @@ Below is a formal specification document for **gocat**. This document describes 
 
 **Version:** 1.0  
 **Date:** 2025-02-18  
-**Author:** [Your Name]
+**Author:** Ryan Copley
 
 ---
 
