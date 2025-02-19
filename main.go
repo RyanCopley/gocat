@@ -44,11 +44,12 @@ var (
 )
 
 func main() {
-	if len(os.Args) < 2 {
+	
+	if len(os.Args) == 0 {
 		printGeneralHelp()
 		os.Exit(1)
 	}
-
+	
 	command := os.Args[1]
 
 	// For commands other than "join", check for updates.
@@ -60,6 +61,11 @@ func main() {
 		} else {
 			checkForUpdates(modNameForUpdate)
 		}
+	}
+	
+	if len(os.Args) < 2 {
+		printGeneralHelp()
+		os.Exit(1)
 	}
 
 	switch command {
