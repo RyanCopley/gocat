@@ -40,7 +40,7 @@
 
 ## Prerequisites
 
-- Go 1.16 or later
+- Go 1.24 or later
 
 ## Installation
 
