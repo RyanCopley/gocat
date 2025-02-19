@@ -1,3 +1,15 @@
+// gocat.go
+//
+// This version of gocat is designed to run on Windows, macOS, and Linux.
+// It bundles source files (Go, Java, Kotlin, and other files) into a single output stream
+// with embedded metadata delimiters, and can later split that stream back into individual files.
+// It supports recursive dependency resolution by scanning import statements,
+// allows exclusion of files/packages, and checks for updates against the public GitHub repo.
+//
+// The current version is embedded in the variable "version" and is intended to be set at build time via ldflags.
+// For example:
+//   go build -ldflags="-s -w -X main.version=$(git describe --tags)" ...
+
 package main
 
 import (
@@ -17,6 +29,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Masterminds/semver/v3"
 )
 
 const (
@@ -25,20 +39,18 @@ const (
 	fileEndFormat   = "// --------- FILE END: \"%s\" ----------\n"
 	fileStartPrefix = "// --------- FILE START: "
 	fileEndPrefix   = "// --------- FILE END: "
-	// GitHub repository info (change these to match your public repo)
-	repoOwner = "yourusername"
-	repoName  = "gocat"
 )
 
 var (
-	// version is set via ldflags (default "dev")
+	// version should be overridden at build time via ldflags (default "dev")
 	version string = "dev"
 
-	// Global variables for exclusion filters.
+	// Global exclusion filters.
 	excludePackages []string
 	excludeFiles    []string
 
-	// Global variable for base package used for Java/Kotlin dependency resolution.
+	// Base package for Java/Kotlin recursive dependency resolution.
+	// Can be specified via -java-base or auto-detected from build files.
 	javaBase string
 )
 
@@ -50,15 +62,20 @@ func main() {
 
 	command := os.Args[1]
 
-	// Do not check for updates if running join (to avoid breaking streaming output)
+	// For commands other than "join", check for updates.
 	if command != "join" {
-		checkForUpdates()
+		modName, err := getModuleName()
+		if err != nil {
+			log.Printf("Update check skipped: %v", err)
+		} else {
+			checkForUpdates(modName)
+		}
 	}
 
 	switch command {
 	case "join":
 		joinCmd := flag.NewFlagSet("join", flag.ExitOnError)
-		excludePkgs := joinCmd.String("exclude-packages", "", "Comma-separated package names to exclude (based on the file's package declaration)")
+		excludePkgs := joinCmd.String("exclude-packages", "", "Comma-separated package names to exclude (for Go files)")
 		excludeFilesFlag := joinCmd.String("exclude-files", "", "Comma-separated file patterns to exclude")
 		javaBaseFlag := joinCmd.String("java-base", "", "Base package for Java/Kotlin recursive dependency resolution")
 		goBaseFlag := joinCmd.String("go-base", "", "Base module for Go recursive dependency resolution (overrides go.mod)")
@@ -68,6 +85,7 @@ func main() {
 		if joinCmd.NArg() == 0 {
 			log.Fatal("Usage: join [file or glob pattern] ...")
 		}
+		// Process exclusion flags.
 		if *excludePkgs != "" {
 			for _, pkg := range strings.Split(*excludePkgs, ",") {
 				excludePackages = append(excludePackages, strings.TrimSpace(pkg))
@@ -78,6 +96,7 @@ func main() {
 				excludeFiles = append(excludeFiles, strings.TrimSpace(file))
 			}
 		}
+		// Set Java/Kotlin base package.
 		javaBase = strings.TrimSpace(*javaBaseFlag)
 		if javaBase == "" {
 			if jb, err := getJavaModuleName(); err == nil {
@@ -86,7 +105,7 @@ func main() {
 				log.Printf("Warning: unable to auto-detect Java base package: %v", err)
 			}
 		}
-
+		// Determine Go module name.
 		var moduleName string
 		if *goBaseFlag != "" {
 			moduleName = strings.TrimSpace(*goBaseFlag)
@@ -161,9 +180,21 @@ func main() {
 	}
 }
 
-// checkForUpdates queries the GitHub API for the latest release and prints a banner
-// if the current version is outdated.
-func checkForUpdates() {
+// checkForUpdates queries GitHub for the latest release and prints a banner with release notes
+// if the current version is outdated. It derives the repository info from the module name.
+func checkForUpdates(moduleName string) {
+	// Expect moduleName in the form "github.com/username/reponame"
+	if !strings.HasPrefix(moduleName, "github.com/") {
+		log.Printf("Update check skipped: module %q is not hosted on GitHub", moduleName)
+		return
+	}
+	parts := strings.Split(moduleName, "/")
+	if len(parts) < 3 {
+		log.Printf("Update check skipped: module %q is not in expected format", moduleName)
+		return
+	}
+	repoOwner := parts[1]
+	repoName := parts[2]
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName)
 	resp, err := http.Get(url)
 	if err != nil {
@@ -171,50 +202,33 @@ func checkForUpdates() {
 		return
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Update check returned status %d", resp.StatusCode)
 		return
 	}
-
 	var rel struct {
 		TagName string `json:"tag_name"`
+		Body    string `json:"body"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
 		log.Printf("Failed to decode update info: %v", err)
 		return
 	}
-
-	if isOutdated(version, rel.TagName) {
-		fmt.Fprintf(os.Stderr, "Update available: version %s is available (you are using %s). Please update!\n", rel.TagName, version)
+	// Use semver to compare versions.
+	currentVer, err := semver.NewVersion(strings.TrimPrefix(version, "v"))
+	if err != nil {
+		log.Printf("Invalid current version format: %v", err)
+		return
 	}
-}
-
-// isOutdated compares semantic versions (assumes a 'v' prefix) and returns true if current is older than latest.
-func isOutdated(current, latest string) bool {
-	trim := func(s string) string {
-		return strings.TrimPrefix(s, "v")
+	latestVer, err := semver.NewVersion(strings.TrimPrefix(rel.TagName, "v"))
+	if err != nil {
+		log.Printf("Invalid latest version format: %v", err)
+		return
 	}
-	curParts := strings.Split(trim(current), ".")
-	latParts := strings.Split(trim(latest), ".")
-	n := len(curParts)
-	if len(latParts) < n {
-		n = len(latParts)
+	if currentVer.LessThan(latestVer) {
+		fmt.Fprintf(os.Stderr, "Update available: version %s is available (you are using %s).\n", rel.TagName, version)
+		fmt.Fprintf(os.Stderr, "Release notes:\n%s\n", rel.Body)
 	}
-	for i := 0; i < n; i++ {
-		c, err1 := strconv.Atoi(curParts[i])
-		l, err2 := strconv.Atoi(latParts[i])
-		if err1 != nil || err2 != nil {
-			// Fallback to string comparison if parsing fails.
-			return current < latest
-		}
-		if c < l {
-			return true
-		} else if c > l {
-			return false
-		}
-	}
-	return len(latParts) > len(curParts)
 }
 
 // getModuleName reads the Go module name from go.mod in the current directory.
@@ -287,7 +301,7 @@ func isExcludedFile(relPath string) bool {
 	return false
 }
 
-// processFile processes any file. For Go, Java, or Kotlin files, it handles them (possibly recursively).
+// processFile processes any file. For Go, Java, or Kotlin files, it handles them recursively.
 // The output is written to w.
 func processFile(filePath, moduleName string, processed map[string]bool, w io.Writer) error {
 	filePath = filepath.Clean(filePath)
@@ -298,7 +312,6 @@ func processFile(filePath, moduleName string, processed map[string]bool, w io.Wr
 		}
 		return err
 	}
-
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
 		return err
@@ -620,7 +633,7 @@ func processNonGoFile(filePath string, w io.Writer) error {
 	return nil
 }
 
-// splitInput reads a joined stream from r and recreates each file based on the delimiters.
+// splitInput reads a joined stream and recreates each file based on the delimiters.
 func splitInput(r io.Reader, outDir string) error {
 	scanner := bufio.NewScanner(r)
 	if !scanner.Scan() {
@@ -726,7 +739,7 @@ func printSubcommandHelp(cmd string) {
 
 Joins the specified source file(s) into a single output stream,
 inserting delimiters between files. For Go files, the tool parses import statements
-and recursively includes any files from packages within the same module (from go.mod or -go-base).
+and recursively includes files from packages within the same module (as determined by go.mod or -go-base).
 For Java/Kotlin files, if a base package is provided via -java-base (or auto-detected), recursive inclusion is performed
 by scanning for import statements.
 Non-source files are simply included as-is.
