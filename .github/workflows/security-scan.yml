@@ -9,20 +9,14 @@ on:
       - main
 
 jobs:
-  gosec:
-    name: Run gosec Security Scan
+  tests:
     runs-on: ubuntu-latest
-
+    env:
+      GO111MODULE: on
     steps:
-      - name: Check out repository
+      - name: Checkout Source
         uses: actions/checkout@v3
-
-      - name: Set up Go
-        uses: actions/setup-go@v4
+      - name: Run Gosec Security Scanner
+        uses: securego/gosec@master
         with:
-          go-version: '1.19'  # adjust to your project's Go version
-
-      - name: Run gosec
-        uses: securego/gosec-action@main
-        with:
-          args: "./..."
+          args: ./...
