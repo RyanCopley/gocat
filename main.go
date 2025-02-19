@@ -1,4 +1,3 @@
-// gocat.go
 package main
 
 import (
@@ -18,6 +17,10 @@ import (
 
 const magicHeader = "// --------- gocat v1"
 
+// Global variables for exclusion filters.
+var excludePackages []string
+var excludeFiles []string
+
 func main() {
 	if len(os.Args) < 2 {
 		printGeneralHelp()
@@ -28,11 +31,27 @@ func main() {
 	switch command {
 	case "join":
 		joinCmd := flag.NewFlagSet("join", flag.ExitOnError)
+		// New flag for excluding packages by their package declaration.
+		excludePkgs := joinCmd.String("exclude-packages", "", "Comma-separated package names to exclude (based on the file's package declaration)")
+		// New flag for excluding specific files.
+		excludeFilesFlag := joinCmd.String("exclude-files", "", "Comma-separated file patterns to exclude")
 		if err := joinCmd.Parse(os.Args[2:]); err != nil {
 			log.Fatalf("Error parsing join command: %v", err)
 		}
 		if joinCmd.NArg() == 0 {
 			log.Fatal("Usage: join [file or glob pattern] ...")
+		}
+		// Process the exclude-packages flag.
+		if *excludePkgs != "" {
+			for _, pkg := range strings.Split(*excludePkgs, ",") {
+				excludePackages = append(excludePackages, strings.TrimSpace(pkg))
+			}
+		}
+		// Process the exclude-files flag.
+		if *excludeFilesFlag != "" {
+			for _, file := range strings.Split(*excludeFilesFlag, ",") {
+				excludeFiles = append(excludeFiles, strings.TrimSpace(file))
+			}
 		}
 
 		// Output the magic header first.
@@ -123,6 +142,27 @@ func getModuleName() (string, error) {
 	return "", fmt.Errorf("module name not found in go.mod")
 }
 
+// getPackageName parses the Go file to extract its package declaration.
+func getPackageName(filePath string) (string, error) {
+	fset := token.NewFileSet()
+	// Parse only the package clause.
+	f, err := parser.ParseFile(fset, filePath, nil, parser.PackageClauseOnly)
+	if err != nil {
+		return "", err
+	}
+	return f.Name.Name, nil
+}
+
+// isExcludedFile checks if the file (by its relative path) matches any exclusion pattern.
+func isExcludedFile(relPath string) bool {
+	for _, pattern := range excludeFiles {
+		if match, err := filepath.Match(pattern, relPath); err == nil && match {
+			return true
+		}
+	}
+	return false
+}
+
 // processFile is the unified function for processing any file.
 // If the file is a Go file, it processes it (and its imports) recursively.
 // Otherwise, it simply outputs the file.
@@ -133,6 +173,16 @@ func processFile(filePath, moduleName string, processed map[string]bool) error {
 	if err != nil {
 		return err
 	}
+
+	// Check for file exclusion based on relative path.
+	relPath, err := filepath.Rel(".", absPath)
+	if err != nil {
+		relPath = filePath
+	}
+	if isExcludedFile(relPath) {
+		return nil
+	}
+
 	// Avoid processing the same file more than once.
 	if processed[absPath] {
 		return nil
@@ -140,6 +190,20 @@ func processFile(filePath, moduleName string, processed map[string]bool) error {
 	processed[absPath] = true
 
 	if filepath.Ext(filePath) == ".go" {
+		// Check the package declaration against the excluded packages.
+		if len(excludePackages) > 0 {
+			pkg, err := getPackageName(filePath)
+			if err != nil {
+				log.Printf("Warning: unable to determine package for %s: %v", filePath, err)
+			} else {
+				for _, ex := range excludePackages {
+					if pkg == ex {
+						// Skip this file.
+						return nil
+					}
+				}
+			}
+		}
 		return processGoFile(filePath, moduleName, processed)
 	}
 	return processNonGoFile(filePath)
@@ -405,7 +469,7 @@ Non-Go files are simply included as-is.
 Each file is included only once.
 
 Example:
-  %s join "main.go" "./pkg/*.go"
+  %s join "main.go" "./pkg/*.go" -exclude-packages="expressions,lexer" -exclude-files="vendor/*,testdata/*"
 
 `, "gocat", "gocat")
 	case "split":
