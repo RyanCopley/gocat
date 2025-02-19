@@ -45,29 +45,24 @@ var (
 
 func main() {
 	
-	if len(os.Args) == 0 {
-		printGeneralHelp()
-		os.Exit(1)
-	}
-	
-	command := os.Args[1]
-
-	// For commands other than "join", check for updates.
-	if command != "join" {
-		// Use build info to get the module name for update checking.
-		modNameForUpdate, err := getModuleNameForUpdater()
-		if err != nil {
-			log.Printf("Update check skipped: %v", err)
-		} else {
-			checkForUpdates(modNameForUpdate)
-		}
-	}
+	// Use build info to get the module name for update checking.
+	modNameForUpdate, moduleNameError := getModuleNameForUpdater()
 	
 	if len(os.Args) < 2 {
+		if moduleNameError == nil {
+			checkForUpdates(modNameForUpdate)
+		}
 		printGeneralHelp()
 		os.Exit(1)
+	}	
+	
+	command := os.Args[1]
+	
+	// For commands other than "join", check for updates.
+	if moduleNameError == nil && command != "join" {
+		checkForUpdates(modNameForUpdate)
 	}
-
+	
 	switch command {
 	case "join":
 		joinCmd := flag.NewFlagSet("join", flag.ExitOnError)
