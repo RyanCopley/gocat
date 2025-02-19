@@ -1,17 +1,20 @@
 # gocat
 
-**gocat** is a command-line utility written in Go that helps you bundle Go source files (and other related files) into a single output stream with embedded metadata delimiters. It also provides a way to split that stream back into the original files, preserving their relative paths. When processing Go files, gocat automatically reads your module name from `go.mod` and recursively includes any Go source files from packages within your module that are imported by the specified files. Any file that is not a Go source file is simply included as-is.
+**gocat** is a command-line utility written in Go that helps you bundle source files (including Go, Java, and Kotlin) into a single output stream with embedded metadata delimiters. It also provides a way to split that stream back into the original files, preserving their relative paths. When processing Go files, gocat automatically reads your module name from `go.mod` (or uses a value provided via the `-go-base` flag) and recursively includes any Go source files from packages within your module that are imported by the specified files. Similarly, for Java and Kotlin files, gocat scans import statements and recursively inlines files that belong to the same base package (which can be auto-detected from common build files or specified via the `-java-base` flag). Any file that is not recognized as a supported source file is simply included as-is.
 
 ## Features
 
 - **Recursive Go File Bundling:**  
-  Reads the module name from `go.mod` and, for each provided Go file (or glob pattern), outputs the file with a header and footer delimiter. It then parses the file for import statements and recursively includes all Go files from packages that belong to the same module.
+  Reads the module name from `go.mod` (or uses the value provided via the `-go-base` flag) and, for each provided Go file (or glob pattern), outputs the file with header and footer delimiters. It then parses the file for import statements and recursively includes all Go files from packages that belong to the same module.
 
-- **Non-Go File Inclusion:**  
-  Any file that does not have a `.go` extension is output with the same delimiters but is not further processed.
+- **Recursive Java/Kotlin File Bundling:**  
+  Scans Java (`.java`) and Kotlin (`.kt`/`.kts`) files for import statements. If an import belongs to the specified base package (which can be auto-detected from `pom.xml`, `build.gradle`, or `build.gradle.kts` or provided via the `-java-base` flag), gocat recursively includes all matching source files.
+
+- **Non-Source File Inclusion:**  
+  Any file that is not a recognized source file is output with the same delimiters but is not further processed.
 
 - **No Duplicate Inclusions:**  
-  Each file is processed only once, even if it is referenced multiple times.
+  Each file is processed only once, even if it is referenced multiple times or if there are cyclic dependencies between source files.
 
 - **Split Functionality:**  
   Easily split the bundled output back into the original individual files, maintaining relative paths.
@@ -57,12 +60,12 @@ This creates an executable named `gocat`.
 
 ### Join Command
 
-The `join` command reads one or more files or glob patterns and outputs the contents of each file wrapped in header and footer delimiters. For Go files, it also parses import statements to recursively include Go files from your module.
+The `join` command reads one or more files or glob patterns and outputs the contents of each file wrapped in header and footer delimiters. For Go files, it parses import statements to recursively include Go files from your module. For Java and Kotlin files, it scans for import statements and recursively includes source files from the same base package.
 
 #### Syntax
 
 ```bash
-./gocat join [file or glob pattern] ...
+./gocat join [file or glob pattern] ... [options]
 ```
 
 #### Examples
@@ -73,22 +76,28 @@ The `join` command reads one or more files or glob patterns and outputs the cont
   ./gocat join main.go
   ```
 
-- **Join Multiple Files (including non-Go files):**
+- **Join Multiple Files (including non-source files):**
 
   ```bash
   ./gocat join "main.go" "assets/*"
   ```
 
-- **Join with Exclusions:**
+- **Join with Exclusions and Base Overrides:**
 
   ```bash
-  ./gocat join "main.go" "./pkg/*.go" -exclude-packages="expressions,lexer" -exclude-files="vendor/*,testdata/*"
+  ./gocat join "main.go" "./pkg/*.go" \
+    -exclude-packages="expressions,lexer" \
+    -exclude-files="vendor/*,testdata/*" \
+    -java-base="com.example" \
+    -go-base="github.com/example/project"
   ```
 
 #### Additional Options
 
 - `-exclude-packages`: Exclude Go files whose package declaration matches any of the specified comma-separated package names.
 - `-exclude-files`: Exclude files matching any of the specified comma-separated glob patterns.
+- `-java-base`: Specify the base package for Java/Kotlin recursive dependency resolution. If omitted, gocat will try to auto-detect the base package from common build files (`pom.xml`, `build.gradle`, or `build.gradle.kts`).
+- `-go-base`: Specify the base module for Go recursive dependency resolution. This overrides reading the module name from `go.mod`.
 
 #### Output Format
 
@@ -155,20 +164,23 @@ The `help` command provides usage information for **gocat** and its subcommands.
 
 ## How It Works
 
-1. **Module Detection:**  
-   gocat reads your module name from `go.mod` in the current directory. This information is used to determine which import paths belong to your module.
+1. **Module/Base Detection:**  
+   - For Go files, gocat reads your module name from `go.mod` unless overridden by the `-go-base` flag.
+   - For Java/Kotlin files, gocat determines the base package from common build files (`pom.xml`, `build.gradle`, or `build.gradle.kts`) unless explicitly provided via the `-java-base` flag.
 
 2. **File Processing:**  
    - **Go Files:**  
      Each Go file specified (or matched via glob) is output with a header and footer delimiter. The file is parsed for its import statements, and for each import that starts with your module name, gocat locates the corresponding package directory and processes all Go files within that package recursively.
-   - **Non-Go Files:**  
-     Files that do not have a `.go` extension are output with the same delimiters but without further processing.
+   - **Java/Kotlin Files:**  
+     Each Java or Kotlin file is output with delimiters. The tool scans these files for import statements and, if an import belongs to the specified base package, recursively processes the corresponding source files.
+   - **Non-Source Files:**  
+     Files that do not have a supported source file extension are output with the same delimiters but are not further processed.
 
 3. **Avoiding Duplicates:**  
-   gocat tracks processed files to ensure that each file is included only once.
+   gocat tracks processed files (by their absolute paths) to ensure that each file is included only once, preventing infinite loops even if files import each other.
 
 4. **Splitting:**  
-   The `split` command reads the bundled output line-by-line, detects file boundaries using the delimiters, and recreates each file in its original relative path.
+   The `split` command reads the bundled output line-by-line, detects file boundaries using the embedded delimiters, and recreates each file in its original relative path.
 
 ## Limitations
 
@@ -176,7 +188,8 @@ The `help` command provides usage information for **gocat** and its subcommands.
   gocat is primarily designed for source code and text files. Binary files may cause unexpected behavior if they contain lines matching the delimiter format.
 
 - **Directory Traversal:**  
-  Non-Go files are not recursively traversed unless explicitly matched via glob patterns.
+  Non-source files are not recursively traversed unless explicitly matched via glob patterns.
 
 - **Delimiter Collisions:**  
   Ensure that your file contents do not inadvertently include lines matching the delimiter pattern.
+  

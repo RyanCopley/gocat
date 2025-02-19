@@ -8,7 +8,7 @@
 
 ## 1. Overview
 
-**Gocat** is a command-line tool written in Go that bundles multiple files into a single output stream and later splits that stream back into the original files. It is designed primarily for Go source files, but also supports non-Go files. For Go files, gocat recursively follows internal module dependencies (as defined in the `go.mod` file) and includes all associated files. The output uses clearly defined delimiters and begins with a mandatory "magic header" to identify the file format and version.
+**Gocat** is a command-line tool written in Go that bundles multiple files into a single output stream and later splits that stream back into the original files. It is designed primarily for Go source files but now also supports Java and Kotlin files. For Go files, gocat recursively follows internal module dependencies (as defined in the `go.mod` file or overridden via a `-go-base` flag) and includes all associated files. For Java and Kotlin files, gocat scans for import statements and recursively includes files belonging to the same base package (which can be auto-detected from common build files or specified via the `-java-base` flag). The output uses clearly defined delimiters and begins with a mandatory "magic header" to identify the file format and version.
 
 ---
 
@@ -16,20 +16,28 @@
 
 ### 2.1 Purpose
 
-- **Bundling:** Combine multiple Go source files (and related non-Go files) into a single stream.
-- **Dependency Resolution:** Parse Go files for import statements and recursively include associated internal module files.
-- **Splitting:** Reconstruct the original file hierarchy from a bundled stream using embedded delimiters and a magic header.
+- **Bundling:**  
+  Combine multiple source files (Go, Java, Kotlin, and related non-source files) into a single stream.
+- **Dependency Resolution:**  
+  - For **Go files:** Parse for import statements and recursively include associated internal module files (using the module name read from `go.mod` or overridden via `-go-base`).
+  - For **Java/Kotlin files:** Scan for import statements and recursively include files from packages belonging to the same base (auto-detected from build files or specified via `-java-base`).
+- **Splitting:**  
+  Reconstruct the original file hierarchy from a bundled stream using embedded delimiters and a magic header.
 
 ### 2.2 Scope
 
 - **Input:**  
   - Files and glob patterns provided via command-line arguments.
-  - A valid `go.mod` file in the current working directory for module name extraction.
+  - For Go files: A valid `go.mod` file in the current working directory, unless overridden by the `-go-base` flag.
+  - For Java/Kotlin files: Common build files (e.g., `pom.xml`, `build.gradle`, or `build.gradle.kts`) may be used for auto-detecting the base package if not provided via `-java-base`.
 - **Processing:**  
   - For **Go source files** (`*.go`):
     - Output the file contents wrapped with header and footer delimiters.
-    - Parse the file for import statements (using Go’s parser) and recursively include files from packages within the same module.
-  - For **non-Go files**:
+    - Parse for import statements and recursively include files from packages within the same module.
+  - For **Java and Kotlin source files** (`*.java`, `*.kt`, `*.kts`):
+    - Output the file contents wrapped with header and footer delimiters.
+    - Scan for import statements and recursively include files that belong to the same base package.
+  - For **non-source files**:
     - Simply output the file with header and footer delimiters without further recursive processing.
 - **Output:**  
   - A single concatenated text stream that begins with a magic header.
@@ -42,12 +50,14 @@
 ## 3. Terminology and Definitions
 
 - **Gocat:** The name of the program.
-- **Magic Header:** A mandatory first line in the bundled output that identifies the file as produced by gocat.  
+- **Magic Header:**  
+  A mandatory first line in the bundled output that identifies the file as produced by gocat.  
   **Format:**  
   ```
   // --------- gocat v1
   ```
-- **File Delimiter:** Special lines inserted before and after each file’s contents.
+- **File Delimiter:**  
+  Special lines inserted before and after each file’s contents.
   - **Header Delimiter:**  
     ```
     // --------- FILE START: "relative/path/to/file" (size: X bytes, modtime: TIMESTAMP) ----------
@@ -56,19 +66,26 @@
     ```
     // --------- FILE END: "relative/path/to/file" ----------
     ```
-- **Module Name:** The identifier for the Go module as defined in the `go.mod` file.
-- **Processed File:** A file that has already been included in the bundle (tracked via its absolute path) to avoid duplication.
+- **Module Name (Go):**  
+  The identifier for the Go module as defined in the `go.mod` file or provided via the `-go-base` flag.
+- **Base Package (Java/Kotlin):**  
+  The common package prefix used for dependency resolution in Java/Kotlin projects, auto-detected from build files or provided via the `-java-base` flag.
+- **Processed File:**  
+  A file that has already been included in the bundle (tracked via its absolute path) to avoid duplication.
 
 ---
 
 ## 4. System Architecture
 
 Gocat is a command-line tool with three main subcommands:
-1. **join:** Bundles files (and recursively includes Go dependencies) into a single stream.
-2. **split:** Splits a bundled output back into individual files.
-3. **help:** Displays usage information.
+1. **join:**  
+   Bundles files (and recursively includes source dependencies for Go, Java, and Kotlin) into a single stream.
+2. **split:**  
+   Splits a bundled output back into individual files.
+3. **help:**  
+   Displays usage information.
 
-Gocat uses Go’s standard libraries for file I/O, command-line flag parsing, and source code parsing (via `go/parser`).
+Gocat uses Go’s standard libraries for file I/O, command-line flag parsing, and source code parsing.
 
 ---
 
@@ -92,26 +109,32 @@ Gocat uses Go’s standard libraries for file I/O, command-line flag parsing, an
 
 - **Command Syntax:**  
   ```
-  gocat join [file or glob pattern] ...
+  gocat join [file or glob pattern] ... [options]
   ```
-- **Module Resolution:**  
-  - Gocat shall read the `go.mod` file from the current directory and extract the module name from a line starting with `module `.
+- **Module/Base Resolution:**  
+  - For Go files, gocat shall read the `go.mod` file to extract the module name unless the `-go-base` flag is provided, in which case that value is used.
+  - For Java/Kotlin files, gocat shall auto-detect the base package from common build files (`pom.xml`, `build.gradle`, `build.gradle.kts`) unless overridden by the `-java-base` flag.
 - **Magic Header Output:**  
   - Before any file processing begins, output the magic header (`// --------- gocat v1`) as the first line.
 - **File Processing:**  
   - For each file (or glob pattern match):
     - **Go Files:**  
       - Print a header delimiter, output the file content, then print a footer delimiter.
-      - Parse the file for import statements and recursively process files in packages with import paths that begin with the module name.
-    - **Non-Go Files:**  
+      - Parse for import statements and recursively process files in packages with import paths that begin with the module name.
+    - **Java/Kotlin Files:**  
+      - Print a header delimiter, output the file content, then print a footer delimiter.
+      - Scan the file for import statements and recursively process files in directories corresponding to the same base package.
+    - **Non-Source Files:**  
       - Print a header delimiter, output the file content, then print a footer delimiter.
       - No further processing is performed.
   - **Duplication Avoidance:**  
-    - Use a tracking mechanism (e.g., a map keyed by absolute file path) to ensure each file is included only once.
+    - Maintain a set of processed file paths to ensure each file is included only once.
 - **Exclusion Options:**  
-  - The join command shall support two optional flags:
-    - **`-exclude-packages`:** Accepts a comma-separated list of package names. For any Go file processed, if the file’s package declaration (extracted using a package clause parser) matches any of the specified names, the file is skipped and its dependencies are not processed.
-    - **`-exclude-files`:** Accepts a comma-separated list of glob patterns. Any file whose relative path matches one of these patterns is skipped from processing.
+  - Support two optional flags:
+    - **`-exclude-packages`:**  
+      Accepts a comma-separated list of package names. For any Go file, if its package declaration matches one of these names, the file (and its dependencies) is skipped.
+    - **`-exclude-files`:**  
+      Accepts a comma-separated list of glob patterns. Any file whose relative path matches one of these patterns is skipped.
 
 ### 5.3 Split Command Requirements
 
@@ -122,14 +145,13 @@ Gocat uses Go’s standard libraries for file I/O, command-line flag parsing, an
 - **Input Handling:**  
   - If `-in` is provided, read from the specified file; otherwise, read from standard input.
 - **Magic Header Validation:**  
-  - The first line of the input must match the magic header exactly (`// --------- gocat v1`). If not, the split process must abort with an error.
+  - The first line of the input must match the magic header exactly (`// --------- gocat v1`); otherwise, abort with an error.
 - **File Extraction:**  
   - Read the input line-by-line.
-  - Upon encountering a header delimiter, extract the file name and create the necessary output file (within the specified output directory, if any).
-  - Continue writing subsequent lines until the corresponding footer delimiter is encountered.
-  - Close the file and resume processing the next file.
+  - Upon encountering a header delimiter, extract the file name and create the corresponding output file (ensuring the path is within the designated output directory).
+  - Write subsequent lines until the matching footer delimiter is encountered, then close the file.
 - **Output Directory Safety:**  
-  - Validate that output paths remain within the designated output directory to prevent directory traversal vulnerabilities.
+  - Validate that output paths remain within the specified output directory to prevent directory traversal vulnerabilities.
 
 ### 5.4 Help Command Requirements
 
@@ -138,7 +160,7 @@ Gocat uses Go’s standard libraries for file I/O, command-line flag parsing, an
   gocat help [subcommand]
   ```
 - **Behavior:**  
-  - With no additional argument, display general usage and list available subcommands.
+  - Without additional arguments, display general usage and list available subcommands.
   - With a subcommand specified (e.g., `join` or `split`), display detailed help for that subcommand.
 
 ---
@@ -148,11 +170,13 @@ Gocat uses Go’s standard libraries for file I/O, command-line flag parsing, an
 - **Performance:**  
   - The tool should efficiently handle a moderate number of files (tens to hundreds) without noticeable delays.
 - **Portability:**  
-  - Gocat must compile and run on all platforms supported by Go.
+  - Gocat must compile and run on all platforms supported by Go (Windows, macOS, Linux).
 - **Maintainability:**  
   - The code must be modular with clear separation between file processing, CLI handling, and splitting logic.
 - **Usability:**  
   - Provide clear help messages and informative error messages.
+- **Consistency:**  
+  - All delimiter strings (magic header, file start, file end) are defined as constants to ensure consistency across the output.
 
 ---
 
@@ -162,16 +186,16 @@ Gocat uses Go’s standard libraries for file I/O, command-line flag parsing, an
 
 - **Processed Files Map:**  
   - Type: `map[string]bool` (keyed by absolute file path) to ensure no file is processed more than once.
-- **Delimiter Strings:**  
+- **Delimiter Constants:**  
   - **Magic Header:**  
     ```
     "// --------- gocat v1"
     ```
-  - **File Start Delimiter:**  
+  - **File Start Delimiter Format:**  
     ```
     "// --------- FILE START: \"relative/path/to/file\" (size: X bytes, modtime: TIMESTAMP) ----------"
     ```
-  - **File End Delimiter:**  
+  - **File End Delimiter Format:**  
     ```
     "// --------- FILE END: \"relative/path/to/file\" ----------"
     ```
@@ -181,41 +205,38 @@ Gocat uses Go’s standard libraries for file I/O, command-line flag parsing, an
 #### 7.2.1 Join Command Algorithm
 
 1. **Output Magic Header:**  
-   - Write the magic header (`// --------- gocat v1`) as the first line.
-2. **Module Name Retrieval:**  
-   - Open and parse `go.mod` to extract the module name.
+   - Write the magic header (`// --------- gocat v1`) as the first line if any output is produced.
+2. **Module/Base Resolution:**  
+   - For Go files, read `go.mod` to extract the module name, unless overridden via `-go-base`.
+   - For Java/Kotlin files, auto-detect the base package from common build files, unless overridden via `-java-base`.
 3. **Process Each File/Pattern:**  
    - For each command-line argument (after glob expansion):
-     - Normalize and check if the file has already been processed.
-     - If it is a Go file:
-       - Print the header delimiter.
-       - Output the file contents.
-       - Print the footer delimiter.
-       - Re-open and parse for import statements.
-       - For each import starting with the module name, recursively process files in that package.
-     - If it is a non-Go file:
-       - Print the header delimiter.
-       - Output the file contents.
-       - Print the footer delimiter.
+     - Normalize the file path and check if it has already been processed.
+     - **Go Files:**  
+       - Output the file content using a header and footer delimiter.
+       - Parse the file for import statements and recursively process files in packages whose import paths begin with the module name.
+     - **Java/Kotlin Files:**  
+       - Output the file content using a header and footer delimiter.
+       - Scan for import statements and recursively process files in directories corresponding to the same base package.
+     - **Non-Source Files:**  
+       - Output the file content with delimiters without further processing.
 4. **Duplication Avoidance:**  
-   - Maintain a set of processed file paths to avoid duplicates.
+   - Maintain a set of processed file paths to avoid processing the same file more than once.
 5. **Exclusion Checks:**  
-   - Prior to processing a file, check its relative path against the glob patterns provided via the `-exclude-files` flag.
-   - For Go files, extract the package declaration and skip processing if it matches any package name provided via the `-exclude-packages` flag.
+   - Before processing a file, check its relative path against glob patterns provided via `-exclude-files`.
+   - For Go files, skip processing if the package declaration matches any name provided via `-exclude-packages`.
 
 #### 7.2.2 Split Command Algorithm
 
 1. **Read and Validate Magic Header:**  
-   - Read the first line and ensure it matches the expected magic header.
+   - Read the first line and verify it matches the expected magic header.
 2. **Line-by-Line Processing:**  
    - For each subsequent line:
-     - If a header delimiter is encountered:
-       - Parse the file name.
-       - Create the output file (ensuring the path is within the designated output directory).
-     - Write lines to the file until a matching footer delimiter is encountered.
-     - Close the file upon encountering the footer delimiter.
+     - If a header delimiter is detected, extract the file name and create the corresponding output file (ensuring output path safety).
+     - Write lines to the file until the matching footer delimiter is encountered.
+     - Close the file and proceed with processing.
 3. **Error Handling:**  
-   - Log errors for malformed delimiters or file I/O issues and continue processing where possible.
+   - Log errors for malformed delimiters or I/O issues and continue processing where possible.
 
 ### 7.3 Command-Line Interface (CLI)
 
@@ -227,10 +248,19 @@ Gocat uses Go’s standard libraries for file I/O, command-line flag parsing, an
   - `join` – Bundles files into a single stream.
   - `split` – Splits a bundled stream into individual files.
   - `help` – Displays usage information.
+- **Options for `join`:**
+  - `-exclude-packages`  
+    Comma-separated list of package names to exclude for Go files.
+  - `-exclude-files`  
+    Comma-separated list of glob patterns to exclude specific files.
+  - `-java-base`  
+    Specifies the base package for Java/Kotlin recursive dependency resolution. If omitted, gocat auto-detects from common build files.
+  - `-go-base`  
+    Specifies the base module for Go dependency resolution, overriding the value from `go.mod`.
 - **Examples:**
   - **Join:**  
     ```
-    gocat join "main.go" "assets/*" -exclude-packages="expressions,lexer" -exclude-files="vendor/*,testdata/*"
+    gocat join "main.go" "assets/*" -exclude-packages="expressions,lexer" -exclude-files="vendor/*,testdata/*" -java-base="com.example" -go-base="github.com/example/project"
     ```
   - **Split:**  
     ```
@@ -245,15 +275,16 @@ Gocat uses Go’s standard libraries for file I/O, command-line flag parsing, an
 
 ## 8. Error Handling and Reporting
 
-- **Module Retrieval:**  
-  - If `go.mod` is missing or the module name cannot be extracted, output a fatal error.
+- **Module/Base Retrieval:**  
+  - If `go.mod` is missing or the module name cannot be extracted (and no `-go-base` is provided), output a fatal error.
+  - For Java/Kotlin files, if auto-detection of the base package fails and none is provided via `-java-base`, log a warning.
 - **File Access:**  
-  - Report errors for inaccessible files and continue processing other files.
+  - Report errors for inaccessible files and continue processing remaining files.
 - **Glob Patterns:**  
   - Log warnings for invalid or non-matching glob patterns.
 - **Magic Header (Split):**  
   - Abort splitting if the first line does not match the magic header.
 - **Delimiter Parsing:**  
   - Log and skip malformed header or footer delimiters.
-- **Output Directory Validation:**  
+- **Output Directory Safety:**  
   - Ensure that files are created only within the specified output directory, logging errors otherwise.
