@@ -20,9 +20,9 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version: '1.19'  # specify your Go version
+          go-version: '1.19'  # adjust to your project's Go version
 
       - name: Run gosec
-        uses: securego/gosec-action@v2
+        uses: securego/gosec-action@main
         with:
           args: "./..."
