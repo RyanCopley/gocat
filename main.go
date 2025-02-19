@@ -305,9 +305,9 @@ func checkForUpdates(moduleName string) {
 		return
 	}
 	if currentVer.LessThan(latestVer) {
-		fmt.Fprintf(os.Stderr, "%sUpdate available:%s version %s is available (you are using %s).\n", Green, Reset, rel.TagName, versionStr)
+		fmt.Fprintf(os.Stderr, "%sUpdate available:%s version %s is available (you are using %s).\n", Green, Reset, rel.TagName, version)
 		fmt.Fprintf(os.Stderr, "%s%s%s\n", Cyan, rel.Body, Reset)
-		fmt.Fprintf(os.Stderr, "%shttps://github.com/%s/%s/compare/%s...%s%s\n", Yellow, repoOwner, repoName, versionStr, rel.TagName, Reset)
+		fmt.Fprintf(os.Stderr, "%shttps://github.com/%s/%s/compare/%s...%s%s\n", Yellow, repoOwner, repoName, version, rel.TagName, Reset)
 	}
 }
 
