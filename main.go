@@ -253,6 +253,11 @@ func getJavaModuleName() (string, error) {
 // checkForUpdates queries GitHub for the latest release and prints a banner with release notes
 // if the current version is outdated. It derives the repository info from the module name.
 func checkForUpdates(moduleName string) {
+	// Do not run update checks for dev builds
+	if version == "dev" {
+		return
+	}
+
 	// Expect moduleName in the form "github.com/username/reponame"
 	if !strings.HasPrefix(moduleName, "github.com/") {
 		log.Printf("Update check skipped: module %q is not hosted on GitHub", moduleName)
@@ -296,7 +301,8 @@ func checkForUpdates(moduleName string) {
 	}
 	if currentVer.LessThan(latestVer) {
 		fmt.Fprintf(os.Stderr, "Update available: version %s is available (you are using %s).\n", rel.TagName, version)
-		fmt.Fprintf(os.Stderr, "Release notes:\n%s\n", rel.Body)
+		fmt.Fprintf(os.Stderr, "%s\n", rel.Body)
+		fmt.Fprintf(os.Stderr, "https://github.com/RyanCopley/gocat/compare/%s...%s\n", version, rel.TagName)
 	}
 }
 
