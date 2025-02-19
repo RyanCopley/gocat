@@ -1,7 +1,7 @@
 # Gocat Formal Specification
 
 **Version:** 0.1
-**Date:** 2025-02-18
+**Date:** 2025-02-18  
 **Author:** Ryan Copley
 
 ---
