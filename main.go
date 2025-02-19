@@ -53,11 +53,12 @@ func main() {
 
 	// For commands other than "join", check for updates.
 	if command != "join" {
-		modName, err := getModuleName()
+		// Use build info to get the module name for update checking.
+		modNameForUpdate, err := getModuleNameForUpdate()
 		if err != nil {
 			log.Printf("Update check skipped: %v", err)
 		} else {
-			checkForUpdates(modName)
+			checkForUpdates(modNameForUpdate)
 		}
 	}
 
@@ -67,7 +68,7 @@ func main() {
 		excludePkgs := joinCmd.String("exclude-packages", "", "Comma-separated package names to exclude (for Go files)")
 		excludeFilesFlag := joinCmd.String("exclude-files", "", "Comma-separated file patterns to exclude")
 		javaBaseFlag := joinCmd.String("java-base", "", "Base package for Java/Kotlin recursive dependency resolution")
-		goBaseFlag := joinCmd.String("go-base", "", "Base module for Go recursive dependency resolution (overrides build info)")
+		goBaseFlag := joinCmd.String("go-base", "", "Base module for Go recursive dependency resolution (overrides go.mod)")
 		if err := joinCmd.Parse(os.Args[2:]); err != nil {
 			log.Fatalf("Error parsing join command: %v", err)
 		}
@@ -94,15 +95,15 @@ func main() {
 				log.Printf("Warning: unable to auto-detect Java base package: %v", err)
 			}
 		}
-		// Determine Go module name.
+		// Determine Go module name from the local go.mod.
 		var moduleName string
 		if *goBaseFlag != "" {
 			moduleName = strings.TrimSpace(*goBaseFlag)
 		} else {
 			var err error
-			moduleName, err = getModuleName()
+			moduleName, err = getModuleNameFromCWD()
 			if err != nil {
-				log.Fatalf("Error retrieving module info: %v", err)
+				log.Fatalf("Error reading go.mod: %v", err)
 			}
 		}
 
@@ -169,9 +170,9 @@ func main() {
 	}
 }
 
-// getModuleName retrieves the module path using runtime debug information.
-// This allows the updater to work even in compiled binaries.
-func getModuleName() (string, error) {
+// getModuleNameForUpdate retrieves the module path from the build info.
+// This is used exclusively by the update checker.
+func getModuleNameForUpdate() (string, error) {
 	bi, ok := debug.ReadBuildInfo()
 	if !ok {
 		return "", fmt.Errorf("failed to read build info")
@@ -180,6 +181,26 @@ func getModuleName() (string, error) {
 		return "", fmt.Errorf("module path not found in build info")
 	}
 	return bi.Main.Path, nil
+}
+
+// getModuleNameFromCWD reads the Go module name from the go.mod file in the current directory.
+// This is used for processing files.
+func getModuleNameFromCWD() (string, error) {
+	data, err := os.ReadFile("go.mod")
+	if err != nil {
+		return "", err
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "module ") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				return parts[1], nil
+			}
+		}
+	}
+	return "", fmt.Errorf("module name not found in go.mod")
 }
 
 // getJavaModuleName attempts to extract the base package (group) from common Java build files.
@@ -238,7 +259,6 @@ func checkForUpdates(moduleName string) {
 	}
 	repoOwner := parts[1]
 	repoName := parts[2]
-
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName) // #nosec G107
 	resp, err := http.Get(url)
 	if err != nil {
