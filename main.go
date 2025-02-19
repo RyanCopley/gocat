@@ -1,4 +1,3 @@
-// gocat.go
 package main
 
 import (
@@ -24,7 +23,7 @@ const magicHeader = "// --------- gocat v1"
 var excludePackages []string
 var excludeFiles []string
 
-// Global variable for Java base package for recursive processing.
+// Global variable for base package used for recursive dependency resolution for Java/Kotlin.
 var javaBase string
 
 func main() {
@@ -37,12 +36,12 @@ func main() {
 	switch command {
 	case "join":
 		joinCmd := flag.NewFlagSet("join", flag.ExitOnError)
-		// New flag for excluding packages by their package declaration (for Go files).
+		// Flag for excluding packages (for Go files).
 		excludePkgs := joinCmd.String("exclude-packages", "", "Comma-separated package names to exclude (based on the file's package declaration)")
-		// New flag for excluding specific files.
+		// Flag for excluding specific files.
 		excludeFilesFlag := joinCmd.String("exclude-files", "", "Comma-separated file patterns to exclude")
-		// New flag for Java: base package for recursive dependency resolution.
-		javaBaseFlag := joinCmd.String("java-base", "", "Base package for Java recursive dependency resolution")
+		// Flag for Java/Kotlin: base package for recursive dependency resolution.
+		javaBaseFlag := joinCmd.String("java-base", "", "Base package for Java/Kotlin recursive dependency resolution")
 		if err := joinCmd.Parse(os.Args[2:]); err != nil {
 			log.Fatalf("Error parsing join command: %v", err)
 		}
@@ -61,10 +60,10 @@ func main() {
 				excludeFiles = append(excludeFiles, strings.TrimSpace(file))
 			}
 		}
-		// Set the Java base package.
+		// Set the Java/Kotlin base package.
 		javaBase = strings.TrimSpace(*javaBaseFlag)
 		if javaBase == "" {
-			// Attempt to auto-detect from pom.xml, build.gradle, or build.gradle.kts.
+			// Attempt to auto-detect from common build files.
 			if jb, err := getJavaModuleName(); err == nil {
 				javaBase = jb
 			} else {
@@ -217,7 +216,7 @@ func isExcludedFile(relPath string) bool {
 	return false
 }
 
-// processFile processes any file. For Go or Java files, it handles them (possibly recursively).
+// processFile processes any file. For Go, Java, or Kotlin files, it handles them (possibly recursively).
 // The output is written to w.
 func processFile(filePath, moduleName string, processed map[string]bool, w io.Writer) error {
 	filePath = filepath.Clean(filePath)
@@ -266,8 +265,11 @@ func processFile(filePath, moduleName string, processed map[string]bool, w io.Wr
 		}
 		return processGoFile(filePath, moduleName, processed, w)
 	case ".java":
-		// For Java files, do not rely on a package line—use recursive import scanning.
+		// Process Java files using import scanning.
 		return processJavaFile(filePath, javaBase, processed, w)
+	case ".kt", ".kts":
+		// Process Kotlin files using import scanning.
+		return processKotlinFile(filePath, javaBase, processed, w)
 	default:
 		return processNonGoFile(filePath, w)
 	}
@@ -307,7 +309,7 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 	// Print header.
 	fmt.Fprintf(w, "// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
 
-	// Open the file and output its contents.
+	// Output file content.
 	f, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -323,7 +325,7 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 	// Print footer.
 	fmt.Fprintf(w, "// --------- FILE END: \"%s\" ----------\n", relPath)
 
-	// Re-open the file for parsing imports.
+	// Parse imports.
 	f2, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -340,7 +342,7 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 		return err
 	}
 
-	// Process each import that begins with the module name.
+	// Process each import starting with the module name.
 	for _, imp := range parsed.Imports {
 		importPath, err := strconv.Unquote(imp.Path.Value)
 		if err != nil {
@@ -384,6 +386,7 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 // then scanning its content for import statements to recursively include internal files
 // if they belong to the specified base package.
 func processJavaFile(filePath, base string, processed map[string]bool, w io.Writer) error {
+	// (The implementation for Java files remains as before.)
 	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
@@ -393,18 +396,12 @@ func processJavaFile(filePath, base string, processed map[string]bool, w io.Writ
 	if err != nil {
 		relPath = filePath
 	}
-
-	// Get file info for metadata.
 	info, err := os.Stat(filePath)
 	if err != nil {
 		return err
 	}
 	modTime := info.ModTime().Format(time.RFC3339)
-
-	// Print header.
 	fmt.Fprintf(w, "// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
-
-	// Open the file and output its contents.
 	f, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -416,19 +413,13 @@ func processJavaFile(filePath, base string, processed map[string]bool, w io.Writ
 	if err := f.Close(); err != nil {
 		log.Printf("Error closing file %s: %v", filePath, err)
 	}
-
-	// Print footer.
 	fmt.Fprintf(w, "// --------- FILE END: \"%s\" ----------\n", relPath)
-
-	// Re-open the file for scanning import statements.
 	f2, err := os.Open(filePath)
 	if err != nil {
 		return err
 	}
 	defer f2.Close()
-
 	scanner := bufio.NewScanner(f2)
-	// Regular expression to match Java import lines.
 	importRegex := regexp.MustCompile(`^\s*import\s+([a-zA-Z0-9_.]+);`)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -437,19 +428,16 @@ func processJavaFile(filePath, base string, processed map[string]bool, w io.Writ
 			continue
 		}
 		importPath := matches[1]
-		// Only process imports that start with the specified base.
 		if importPath == base || strings.HasPrefix(importPath, base+".") {
 			var relDir string
 			if importPath == base {
 				relDir = "."
 			} else {
 				relDir = strings.TrimPrefix(importPath, base+".")
-				// Convert package dots to directory separators.
 				relDir = filepath.FromSlash(strings.ReplaceAll(relDir, ".", "/"))
 			}
 			packageDir := filepath.Join(".", relDir)
 			packageDir = filepath.Clean(packageDir)
-
 			entries, err := os.ReadDir(packageDir)
 			if err != nil {
 				log.Printf("Error reading directory %q: %v", packageDir, err)
@@ -459,8 +447,90 @@ func processJavaFile(filePath, base string, processed map[string]bool, w io.Writ
 				if entry.IsDir() {
 					continue
 				}
-				// Only process .java files.
 				if filepath.Ext(entry.Name()) != ".java" {
+					continue
+				}
+				fileInPkg := filepath.Join(packageDir, entry.Name())
+				fileInPkg = filepath.Clean(fileInPkg)
+				if err := processFile(fileInPkg, base, processed, w); err != nil {
+					log.Printf("Error processing %s: %v", fileInPkg, err)
+				}
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// processKotlinFile processes a Kotlin source file (.kt or .kts) by printing its header, content, and footer,
+// then scanning its content for import statements to recursively include internal files
+// if they belong to the specified base package. The regex here accepts an optional semicolon.
+func processKotlinFile(filePath, base string, processed map[string]bool, w io.Writer) error {
+	filePath = filepath.Clean(filePath)
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return err
+	}
+	relPath, err := filepath.Rel(".", absPath)
+	if err != nil {
+		relPath = filePath
+	}
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return err
+	}
+	modTime := info.ModTime().Format(time.RFC3339)
+	fmt.Fprintf(w, "// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
+	f, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(w, f); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		log.Printf("Error closing file %s: %v", filePath, err)
+	}
+	fmt.Fprintf(w, "// --------- FILE END: \"%s\" ----------\n", relPath)
+	f2, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer f2.Close()
+	scanner := bufio.NewScanner(f2)
+	// Kotlin import lines do not require a semicolon.
+	importRegex := regexp.MustCompile(`^\s*import\s+([a-zA-Z0-9_.]+);?`)
+	for scanner.Scan() {
+		line := scanner.Text()
+		matches := importRegex.FindStringSubmatch(line)
+		if matches == nil {
+			continue
+		}
+		importPath := matches[1]
+		if importPath == base || strings.HasPrefix(importPath, base+".") {
+			var relDir string
+			if importPath == base {
+				relDir = "."
+			} else {
+				relDir = strings.TrimPrefix(importPath, base+".")
+				relDir = filepath.FromSlash(strings.ReplaceAll(relDir, ".", "/"))
+			}
+			packageDir := filepath.Join(".", relDir)
+			packageDir = filepath.Clean(packageDir)
+			entries, err := os.ReadDir(packageDir)
+			if err != nil {
+				log.Printf("Error reading directory %q: %v", packageDir, err)
+				continue
+			}
+			for _, entry := range entries {
+				if entry.IsDir() {
+					continue
+				}
+				ext := filepath.Ext(entry.Name())
+				if ext != ".kt" && ext != ".kts" {
 					continue
 				}
 				fileInPkg := filepath.Join(packageDir, entry.Name())
@@ -488,17 +558,12 @@ func processNonGoFile(filePath string, w io.Writer) error {
 	if err != nil {
 		relPath = filePath
 	}
-
 	info, err := os.Stat(filePath)
 	if err != nil {
 		return err
 	}
 	modTime := info.ModTime().Format(time.RFC3339)
-
-	// Print header.
 	fmt.Fprintf(w, "// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
-
-	// Open and copy file content.
 	f, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -510,8 +575,6 @@ func processNonGoFile(filePath string, w io.Writer) error {
 	if err := f.Close(); err != nil {
 		log.Printf("Error closing file %s: %v", filePath, err)
 	}
-
-	// Print footer.
 	fmt.Fprintf(w, "// --------- FILE END: \"%s\" ----------\n", relPath)
 	return nil
 }
@@ -519,8 +582,6 @@ func processNonGoFile(filePath string, w io.Writer) error {
 // splitInput reads a joined stream from r and recreates each file based on the delimiters.
 func splitInput(r io.Reader, outDir string) error {
 	scanner := bufio.NewScanner(r)
-
-	// Validate magic header.
 	if !scanner.Scan() {
 		return fmt.Errorf("input is empty, missing magic header")
 	}
@@ -528,7 +589,6 @@ func splitInput(r io.Reader, outDir string) error {
 	if !strings.HasPrefix(firstLine, magicHeader) {
 		return fmt.Errorf("invalid magic header: %s", firstLine)
 	}
-
 	var absOutDir string
 	var err error
 	if outDir != "" {
@@ -537,16 +597,13 @@ func splitInput(r io.Reader, outDir string) error {
 			return fmt.Errorf("failed to get absolute path for output directory: %v", err)
 		}
 	}
-
 	var currentFile *os.File
 	var currentFilename string
 	inFile := false
 	headerPrefix := "// --------- FILE START: "
 	footerPrefix := "// --------- FILE END: "
-
 	for scanner.Scan() {
 		line := scanner.Text()
-
 		if strings.HasPrefix(line, headerPrefix) {
 			startQuote := strings.Index(line, "\"")
 			if startQuote == -1 {
@@ -583,7 +640,6 @@ func splitInput(r io.Reader, outDir string) error {
 			inFile = true
 			continue
 		}
-
 		if strings.HasPrefix(line, footerPrefix) && inFile {
 			if currentFile != nil {
 				if err := currentFile.Close(); err != nil {
@@ -595,7 +651,6 @@ func splitInput(r io.Reader, outDir string) error {
 			inFile = false
 			continue
 		}
-
 		if inFile && currentFile != nil {
 			if _, err := currentFile.WriteString(line + "\n"); err != nil {
 				log.Printf("Error writing to file %q: %v", currentFilename, err)
@@ -633,7 +688,7 @@ func printSubcommandHelp(cmd string) {
 Joins the specified source file(s) into a single output stream,
 inserting delimiters between files. For Go files, the tool parses its imports
 and recursively includes any files from packages within the same module (as determined by go.mod).
-For Java files, if a base package is provided via -java-base (or auto-detected from a build file),
+For Java/Kotlin files, if a base package is provided via -java-base (or auto-detected from a build file),
 recursive inclusion is performed by scanning for import statements.
 Non-source files are simply included as-is.
 Each file is included only once.
