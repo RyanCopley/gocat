@@ -1,6 +1,6 @@
 # Gocat Formal Specification
 
-**Version:** 0.1
+**Version:** 0.1  
 **Date:** 2025-02-18  
 **Author:** Ryan Copley
 
@@ -108,6 +108,10 @@ Gocat uses Go’s standard libraries for file I/O, command-line flag parsing, an
       - No further processing is performed.
   - **Duplication Avoidance:**  
     - Use a tracking mechanism (e.g., a map keyed by absolute file path) to ensure each file is included only once.
+- **Exclusion Options:**  
+  - The join command shall support two optional flags:
+    - **`-exclude-packages`:** Accepts a comma-separated list of package names. For any Go file processed, if the file’s package declaration (extracted using a package clause parser) matches any of the specified names, the file is skipped and its dependencies are not processed.
+    - **`-exclude-files`:** Accepts a comma-separated list of glob patterns. Any file whose relative path matches one of these patterns is skipped from processing.
 
 ### 5.3 Split Command Requirements
 
@@ -195,6 +199,9 @@ Gocat uses Go’s standard libraries for file I/O, command-line flag parsing, an
        - Print the footer delimiter.
 4. **Duplication Avoidance:**  
    - Maintain a set of processed file paths to avoid duplicates.
+5. **Exclusion Checks:**  
+   - Prior to processing a file, check its relative path against the glob patterns provided via the `-exclude-files` flag.
+   - For Go files, extract the package declaration and skip processing if it matches any package name provided via the `-exclude-packages` flag.
 
 #### 7.2.2 Split Command Algorithm
 
@@ -223,7 +230,7 @@ Gocat uses Go’s standard libraries for file I/O, command-line flag parsing, an
 - **Examples:**
   - **Join:**  
     ```
-    gocat join "main.go" "assets/*"
+    gocat join "main.go" "assets/*" -exclude-packages="expressions,lexer" -exclude-files="vendor/*,testdata/*"
     ```
   - **Split:**  
     ```
