@@ -1,463 +1,463 @@
-// main.go
-//
-// Gocat v0.1 - Ryan Copley (2025-02-18)
-//
-// This tool bundles multiple files (with recursive resolution for Go files)
-// into a single output stream and can later split that stream back into the
-// original file hierarchy.
-
 package main
 
 import (
 	"bufio"
-	"bytes"
 	"flag"
 	"fmt"
 	"go/parser"
 	"go/token"
 	"io"
-	"io/ioutil"
+	"log"
 	"os"
 	"path/filepath"
-	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// Constants for the magic header and file delimiters.
-const (
-	magicHeader     = "// --------- gocat v1"
-	fileStartFormat = "// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------"
-	fileEndFormat   = "// --------- FILE END: \"%s\" ----------"
-)
+const magicHeader = "// --------- gocat v1"
 
-// Global map to track processed files (using their absolute paths).
-var processedFiles map[string]bool
-
-// Global slices for exclusion flags.
-var excludeFilePatterns []string
-var excludePackageNames []string
+// Global variable for excluded package names.
+var excludePackages []string
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Error: No subcommand provided.")
-		printGeneralUsage()
+		printGeneralHelp()
 		os.Exit(1)
 	}
-	cmd := os.Args[1]
-	switch cmd {
+
+	command := os.Args[1]
+	switch command {
 	case "join":
-		runJoin(os.Args[2:])
-	case "split":
-		runSplit(os.Args[2:])
-	case "help":
-		runHelp(os.Args[2:])
-	default:
-		fmt.Fprintf(os.Stderr, "Unknown subcommand: %s\n", cmd)
-		printGeneralUsage()
-		os.Exit(1)
-	}
-}
+		joinCmd := flag.NewFlagSet("join", flag.ExitOnError)
+		// New flag for excluding packages by their package declaration.
+		excludePkgs := joinCmd.String("exclude-packages", "", "Comma-separated package names to exclude (based on the file's package declaration)")
+		if err := joinCmd.Parse(os.Args[2:]); err != nil {
+			log.Fatalf("Error parsing join command: %v", err)
+		}
+		if joinCmd.NArg() == 0 {
+			log.Fatal("Usage: join [file or glob pattern] ...")
+		}
+		// Process the exclude-packages flag.
+		if *excludePkgs != "" {
+			for _, pkg := range strings.Split(*excludePkgs, ",") {
+				excludePackages = append(excludePackages, strings.TrimSpace(pkg))
+			}
+		}
 
-// printGeneralUsage prints general usage information.
-func printGeneralUsage() {
-	usage := `Usage: gocat <command> [options] [arguments]
-Commands:
-   join   Bundles files into a single stream.
-   split  Splits a bundled stream into individual files.
-   help   Displays usage information.
-`
-	fmt.Println(usage)
-}
+		// Output the magic header first.
+		fmt.Println(magicHeader)
 
-// runJoin implements the "join" subcommand.
-func runJoin(args []string) {
-	// Define join-specific flags.
-	fs := flag.NewFlagSet("join", flag.ExitOnError)
-	exclFiles := fs.String("exclude-files", "", "Comma-separated glob patterns for files to exclude")
-	exclPkgs := fs.String("exclude-packages", "", "Comma-separated package names (or prefixes) to exclude from recursive processing")
-	fs.Parse(args)
-
-	// The remaining arguments are file or glob patterns.
-	files := fs.Args()
-	if len(files) == 0 {
-		fmt.Fprintln(os.Stderr, "Error: join requires at least one file or glob pattern.")
-		os.Exit(1)
-	}
-
-	// Process comma-separated exclusion patterns.
-	if *exclFiles != "" {
-		excludeFilePatterns = splitAndTrim(*exclFiles)
-	}
-	if *exclPkgs != "" {
-		excludePackageNames = splitAndTrim(*exclPkgs)
-	}
-
-	// Output the magic header first.
-	fmt.Println(magicHeader)
-
-	// Retrieve the module name from go.mod.
-	moduleName, err := getModuleName()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error retrieving module name: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Initialize the processed-files map.
-	processedFiles = make(map[string]bool)
-
-	// Process each provided file or glob pattern.
-	for _, pattern := range files {
-		matches, err := filepath.Glob(pattern)
+		// Read the module name from go.mod.
+		moduleName, err := getModuleName()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Invalid glob pattern '%s': %v\n", pattern, err)
-			continue
+			log.Fatalf("Error reading go.mod: %v", err)
 		}
-		if len(matches) == 0 {
-			fmt.Fprintf(os.Stderr, "Warning: pattern '%s' did not match any files.\n", pattern)
-		}
-		for _, match := range matches {
-			processPath(match, moduleName)
-		}
-	}
-}
 
-// splitAndTrim splits a comma-separated string and trims whitespace.
-func splitAndTrim(s string) []string {
-	parts := strings.Split(s, ",")
-	for i, part := range parts {
-		parts[i] = strings.TrimSpace(part)
-	}
-	return parts
-}
-
-// processPath handles a given path. If it is a directory, it walks recursively.
-func processPath(path, moduleName string) {
-	info, err := os.Stat(path)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error accessing path %s: %v\n", path, err)
-		return
-	}
-	if info.IsDir() {
-		// Walk the directory recursively.
-		filepath.Walk(path, func(subpath string, subinfo os.FileInfo, err error) error {
+		processed := make(map[string]bool)
+		// Process each provided glob pattern.
+		for _, pattern := range joinCmd.Args() {
+			pattern = filepath.Clean(pattern)
+			matches, err := filepath.Glob(pattern)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error accessing %s: %v\n", subpath, err)
-				return nil
-			}
-			if !subinfo.IsDir() {
-				processFile(subpath, moduleName)
-			}
-			return nil
-		})
-	} else {
-		processFile(path, moduleName)
-	}
-}
-
-// processFile writes a file's contents with header/footer delimiters
-// and, if it is a Go file, processes its import statements recursively.
-func processFile(filePath, moduleName string) {
-	// Get the absolute path to avoid duplicate processing.
-	absPath, err := filepath.Abs(filePath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error getting absolute path for %s: %v\n", filePath, err)
-		return
-	}
-	if processedFiles[absPath] {
-		return
-	}
-
-	// Compute a relative path (for display in the delimiters).
-	cwd, _ := os.Getwd()
-	relPath, err := filepath.Rel(cwd, absPath)
-	if err != nil {
-		relPath = filePath // fallback to the original path
-	}
-
-	// Check if the file should be excluded.
-	if isExcludedFile(relPath) {
-		return
-	}
-
-	processedFiles[absPath] = true
-
-	// Get file information.
-	info, err := os.Stat(filePath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error stating file %s: %v\n", filePath, err)
-		return
-	}
-
-	// Read the file content.
-	content, err := ioutil.ReadFile(filePath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading file %s: %v\n", filePath, err)
-		return
-	}
-
-	// Output the header delimiter.
-	fmt.Printf(fileStartFormat+"\n", relPath, info.Size(), info.ModTime().Format(time.RFC3339))
-	// Output the file content.
-	fmt.Print(string(content))
-	// Output the footer delimiter.
-	fmt.Printf(fileEndFormat+"\n", relPath)
-
-	// For Go files, parse and process import statements.
-	if strings.HasSuffix(filePath, ".go") {
-		processGoFileForImports(filePath, moduleName)
-	}
-}
-
-// isExcludedFile returns true if the file's relative path matches any exclusion pattern.
-func isExcludedFile(relPath string) bool {
-	for _, pattern := range excludeFilePatterns {
-		match, err := filepath.Match(pattern, relPath)
-		if err == nil && match {
-			return true
-		}
-	}
-	return false
-}
-
-// processGoFileForImports parses a Go file for import statements and,
-// for each import that starts with the module name (unless excluded), recursively processes
-// the package directory.
-func processGoFileForImports(filePath, moduleName string) {
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, filePath, nil, parser.ImportsOnly)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing Go file %s: %v\n", filePath, err)
-		return
-	}
-	for _, imp := range f.Imports {
-		// Remove quotes from the import path.
-		importPath := strings.Trim(imp.Path.Value, "\"")
-
-		// Check if the import path should be excluded.
-		skip := false
-		for _, excl := range excludePackageNames {
-			// Exact match or if the import path has the exclusion as a prefix (followed by a slash).
-			if importPath == excl || strings.HasPrefix(importPath, excl+"/") {
-				skip = true
-				break
-			}
-		}
-		if skip {
-			continue
-		}
-
-		if strings.HasPrefix(importPath, moduleName) {
-			// Compute the package directory.
-			subPath := strings.TrimPrefix(importPath, moduleName)
-			subPath = strings.TrimPrefix(subPath, "/")
-			var pkgDir string
-			if subPath == "" {
-				// Importing the module root.
-				pkgDir = "."
-			} else {
-				pkgDir = subPath
-			}
-			// Get the absolute path of the package directory.
-			absPkgDir, err := filepath.Abs(pkgDir)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error getting absolute path for package directory %s: %v\n", pkgDir, err)
+				log.Printf("Invalid glob pattern %q: %v", pattern, err)
 				continue
 			}
-			// Walk the package directory and process all .go files.
-			err = filepath.Walk(absPkgDir, func(path string, info os.FileInfo, err error) error {
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error accessing %s: %v\n", path, err)
-					return nil
+			if len(matches) == 0 {
+				log.Printf("No matches found for pattern %q", pattern)
+				continue
+			}
+			for _, file := range matches {
+				file = filepath.Clean(file)
+				if err := processFile(file, moduleName, processed); err != nil {
+					log.Printf("Error processing %s: %v", file, err)
 				}
-				if info.IsDir() {
-					return nil
-				}
-				if strings.HasSuffix(path, ".go") {
-					processFile(path, moduleName)
-				}
-				return nil
-			})
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error walking package directory %s: %v\n", absPkgDir, err)
 			}
 		}
+	case "split":
+		splitCmd := flag.NewFlagSet("split", flag.ExitOnError)
+		inputFile := splitCmd.String("in", "", "Input file to split (default: STDIN)")
+		outputDir := splitCmd.String("out", "", "Output directory (default: current directory)")
+		if err := splitCmd.Parse(os.Args[2:]); err != nil {
+			log.Fatalf("Error parsing split command: %v", err)
+		}
+
+		var in io.Reader
+		if *inputFile != "" {
+			*inputFile = filepath.Clean(*inputFile)
+			f, err := os.Open(*inputFile)
+			if err != nil {
+				log.Fatalf("Error opening input file %q: %v", *inputFile, err)
+			}
+			defer func() {
+				if err := f.Close(); err != nil {
+					log.Printf("Error closing input file: %v", err)
+				}
+			}()
+			in = f
+		} else {
+			in = os.Stdin
+		}
+		if err := splitInput(in, *outputDir); err != nil {
+			log.Fatalf("Error splitting input: %v", err)
+		}
+	case "help":
+		if len(os.Args) == 2 {
+			printGeneralHelp()
+		} else {
+			printSubcommandHelp(os.Args[2])
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", command)
+		printGeneralHelp()
+		os.Exit(1)
 	}
 }
 
-// getModuleName reads the go.mod file in the current directory and extracts
-// the module name from the line beginning with "module ".
+// getModuleName reads the module name from go.mod in the current directory.
 func getModuleName() (string, error) {
-	data, err := ioutil.ReadFile("go.mod")
+	data, err := os.ReadFile("go.mod")
 	if err != nil {
-		return "", fmt.Errorf("go.mod file not found")
+		return "", err
 	}
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "module ") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "module ")), nil
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				return parts[1], nil
+			}
 		}
 	}
 	return "", fmt.Errorf("module name not found in go.mod")
 }
 
-// runSplit implements the "split" subcommand.
-func runSplit(args []string) {
-	// Define flags.
-	fs := flag.NewFlagSet("split", flag.ExitOnError)
-	inFile := fs.String("in", "", "Input file (defaults to stdin)")
-	outDir := fs.String("out", ".", "Output directory")
-	fs.Parse(args)
-
-	// Open the input stream.
-	var reader io.Reader
-	if *inFile != "" {
-		f, err := os.Open(*inFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening input file %s: %v\n", *inFile, err)
-			os.Exit(1)
-		}
-		defer f.Close()
-		reader = f
-	} else {
-		reader = os.Stdin
+// getPackageName parses the Go file to extract its package declaration.
+func getPackageName(filePath string) (string, error) {
+	fset := token.NewFileSet()
+	// Parse only the package clause.
+	f, err := parser.ParseFile(fset, filePath, nil, parser.PackageClauseOnly)
+	if err != nil {
+		return "", err
 	}
+	return f.Name.Name, nil
+}
 
-	scanner := bufio.NewScanner(reader)
-	// Validate the magic header.
-	if !scanner.Scan() {
-		fmt.Fprintln(os.Stderr, "Error: Input is empty, magic header missing.")
-		os.Exit(1)
+// processFile is the unified function for processing any file.
+// If the file is a Go file, it processes it (and its imports) recursively.
+// Otherwise, it simply outputs the file.
+func processFile(filePath, moduleName string, processed map[string]bool) error {
+	// Normalize the file path.
+	filePath = filepath.Clean(filePath)
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return err
 	}
-	firstLine := scanner.Text()
-	if firstLine != magicHeader {
-		fmt.Fprintln(os.Stderr, "Error: Magic header does not match. Aborting split.")
-		os.Exit(1)
+	// Avoid processing the same file more than once.
+	if processed[absPath] {
+		return nil
 	}
+	processed[absPath] = true
 
-	// Compile regexes to match file header and footer delimiters.
-	headerRegex := regexp.MustCompile(`^// --------- FILE START: "(.+)" \(size: (\d+) bytes, modtime: (.+)\) ----------$`)
-	footerRegex := regexp.MustCompile(`^// --------- FILE END: "(.+)" ----------$`)
-
-	var currentFile *os.File
-	var currentFileName string
-	for scanner.Scan() {
-		line := scanner.Text()
-		// Check for a header delimiter.
-		if matches := headerRegex.FindStringSubmatch(line); matches != nil {
-			// If already writing a file, this is a mismatch.
-			if currentFile != nil {
-				fmt.Fprintf(os.Stderr, "Error: encountered new file header before previous file ended.\n")
-				currentFile.Close()
-				currentFile = nil
-			}
-			currentFileName = matches[1]
-			// Build the output file path within the designated output directory.
-			outPath := filepath.Join(*outDir, currentFileName)
-			// Ensure the output file remains within the output directory.
-			if !strings.HasPrefix(filepath.Clean(outPath), filepath.Clean(*outDir)) {
-				fmt.Fprintf(os.Stderr, "Error: output file %s is outside of output directory.\n", outPath)
-				continue
-			}
-			// Create necessary directories.
-			if err := os.MkdirAll(filepath.Dir(outPath), os.ModePerm); err != nil {
-				fmt.Fprintf(os.Stderr, "Error creating directories for %s: %v\n", outPath, err)
-				continue
-			}
-			f, err := os.Create(outPath)
+	if filepath.Ext(filePath) == ".go" {
+		// Check the package declaration against the excluded packages.
+		if len(excludePackages) > 0 {
+			pkg, err := getPackageName(filePath)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error creating file %s: %v\n", outPath, err)
-				continue
-			}
-			currentFile = f
-		} else if matches := footerRegex.FindStringSubmatch(line); matches != nil {
-			// A footer delimiter has been encountered.
-			if currentFile == nil {
-				fmt.Fprintf(os.Stderr, "Error: encountered footer without a corresponding header.\n")
-				continue
-			}
-			// Verify that the footer file name matches the header.
-			if matches[1] != currentFileName {
-				fmt.Fprintf(os.Stderr, "Error: footer file name %s does not match header file name %s.\n", matches[1], currentFileName)
-				currentFile.Close()
-				currentFile = nil
-				continue
-			}
-			currentFile.Close()
-			currentFile = nil
-		} else {
-			// Regular file content lines.
-			if currentFile != nil {
-				_, err := currentFile.WriteString(line + "\n")
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error writing to file %s: %v\n", currentFileName, err)
+				log.Printf("Warning: unable to determine package for %s: %v", filePath, err)
+			} else {
+				for _, ex := range excludePackages {
+					if pkg == ex {
+						// Skip this file.
+						return nil
+					}
 				}
 			}
 		}
+		return processGoFile(filePath, moduleName, processed)
+	}
+	return processNonGoFile(filePath)
+}
+
+// processGoFile processes a Go source file by printing its header, content, and footer,
+// then parsing its import statements to recursively include any internal files.
+func processGoFile(filePath, moduleName string, processed map[string]bool) error {
+	filePath = filepath.Clean(filePath)
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return err
+	}
+	relPath, err := filepath.Rel(".", absPath)
+	if err != nil {
+		relPath = filePath
 	}
 
-	if currentFile != nil {
-		currentFile.Close()
+	// Get file info for metadata.
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return err
+	}
+	modTime := info.ModTime().Format(time.RFC3339)
+
+	// Print header.
+	fmt.Printf("// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
+
+	// Open the file and output its contents.
+	f, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(os.Stdout, f); err != nil {
+		if cerr := f.Close(); cerr != nil {
+			log.Printf("Error closing file %s: %v", filePath, cerr)
+		}
+		return err
+	}
+	if err := f.Close(); err != nil {
+		log.Printf("Error closing file %s: %v", filePath, err)
 	}
 
+	// Print footer.
+	fmt.Printf("// --------- FILE END: \"%s\" ----------\n", relPath)
+
+	// Re-open the file for parsing imports.
+	f2, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := f2.Close(); cerr != nil {
+			log.Printf("Error closing file %s: %v", filePath, cerr)
+		}
+	}()
+
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, filePath, f2, parser.ImportsOnly)
+	if err != nil {
+		return err
+	}
+
+	// Process each import that begins with the module name.
+	for _, imp := range parsed.Imports {
+		importPath, err := strconv.Unquote(imp.Path.Value)
+		if err != nil {
+			continue
+		}
+		if !strings.HasPrefix(importPath, moduleName) {
+			continue
+		}
+
+		var relDir string
+		if importPath == moduleName {
+			relDir = "."
+		} else if strings.HasPrefix(importPath, moduleName+"/") {
+			relDir = strings.TrimPrefix(importPath, moduleName+"/")
+		} else {
+			continue
+		}
+		packageDir := filepath.Join(".", relDir)
+		packageDir = filepath.Clean(packageDir)
+
+		entries, err := os.ReadDir(packageDir)
+		if err != nil {
+			log.Printf("Error reading directory %q: %v", packageDir, err)
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			fileInPkg := filepath.Join(packageDir, entry.Name())
+			fileInPkg = filepath.Clean(fileInPkg)
+			if err := processFile(fileInPkg, moduleName, processed); err != nil {
+				log.Printf("Error processing %s: %v", fileInPkg, err)
+			}
+		}
+	}
+	return nil
+}
+
+// processNonGoFile prints a non-Go file with the appropriate header, content, and footer.
+func processNonGoFile(filePath string) error {
+	filePath = filepath.Clean(filePath)
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return err
+	}
+	relPath, err := filepath.Rel(".", absPath)
+	if err != nil {
+		relPath = filePath
+	}
+
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return err
+	}
+	modTime := info.ModTime().Format(time.RFC3339)
+
+	// Print header.
+	fmt.Printf("// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
+
+	// Open and copy file content.
+	f, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(os.Stdout, f); err != nil {
+		if cerr := f.Close(); cerr != nil {
+			log.Printf("Error closing file %s: %v", filePath, cerr)
+		}
+		return err
+	}
+	if err := f.Close(); err != nil {
+		log.Printf("Error closing file %s: %v", filePath, err)
+	}
+
+	// Print footer.
+	fmt.Printf("// --------- FILE END: \"%s\" ----------\n", relPath)
+	return nil
+}
+
+// splitInput reads a joined stream from r and recreates each file based on the delimiters.
+func splitInput(r io.Reader, outDir string) error {
+	scanner := bufio.NewScanner(r)
+
+	// Validate magic header.
+	if !scanner.Scan() {
+		return fmt.Errorf("input is empty, missing magic header")
+	}
+	firstLine := scanner.Text()
+	if !strings.HasPrefix(firstLine, magicHeader) {
+		return fmt.Errorf("invalid magic header: %s", firstLine)
+	}
+
+	var absOutDir string
+	var err error
+	if outDir != "" {
+		absOutDir, err = filepath.Abs(filepath.Clean(outDir))
+		if err != nil {
+			return fmt.Errorf("failed to get absolute path for output directory: %v", err)
+		}
+	}
+
+	var currentFile *os.File
+	var currentFilename string
+	inFile := false
+	headerPrefix := "// --------- FILE START: "
+	footerPrefix := "// --------- FILE END: "
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if strings.HasPrefix(line, headerPrefix) {
+			startQuote := strings.Index(line, "\"")
+			if startQuote == -1 {
+				log.Printf("Invalid header format: %s", line)
+				continue
+			}
+			endQuote := strings.Index(line[startQuote+1:], "\"")
+			if endQuote == -1 {
+				log.Printf("Invalid header format: %s", line)
+				continue
+			}
+			filename := line[startQuote+1 : startQuote+1+endQuote]
+			filename = filepath.Clean(filename)
+			if absOutDir != "" {
+				filename = filepath.Join(absOutDir, filename)
+				filename = filepath.Clean(filename)
+				relToOut, err := filepath.Rel(absOutDir, filename)
+				if err != nil || strings.HasPrefix(relToOut, "..") {
+					log.Printf("Invalid output file path %q; skipping", filename)
+					continue
+				}
+			}
+			if err := os.MkdirAll(filepath.Dir(filename), 0750); err != nil {
+				log.Printf("Error creating directories for %q: %v", filename, err)
+				continue
+			}
+			f, err := os.Create(filename)
+			if err != nil {
+				log.Printf("Error creating file %q: %v", filename, err)
+				continue
+			}
+			currentFile = f
+			currentFilename = filename
+			inFile = true
+			continue
+		}
+
+		if strings.HasPrefix(line, footerPrefix) && inFile {
+			if currentFile != nil {
+				if err := currentFile.Close(); err != nil {
+					log.Printf("Error closing file %q: %v", currentFilename, err)
+				}
+			}
+			currentFile = nil
+			currentFilename = ""
+			inFile = false
+			continue
+		}
+
+		if inFile && currentFile != nil {
+			if _, err := currentFile.WriteString(line + "\n"); err != nil {
+				log.Printf("Error writing to file %q: %v", currentFilename, err)
+			}
+		}
+	}
 	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
-		os.Exit(1)
+		return err
 	}
+	return nil
 }
 
-// runHelp implements the "help" subcommand.
-func runHelp(args []string) {
-	if len(args) == 0 {
-		printGeneralUsage()
-		fmt.Println("Use 'gocat help <command>' for more information on a command.")
-		return
-	}
-	subcommand := args[0]
-	switch subcommand {
+// printGeneralHelp prints the general usage message.
+func printGeneralHelp() {
+	fmt.Printf(`Usage: %s <command> [options]
+
+Commands:
+  join    Join Go source files (and their internal module dependencies) into a single stream.
+          Non-Go files are included as-is.
+  split   Split a joined file into separate source (or non-source) files.
+  help    Show help information.
+
+For detailed help on a command, run:
+  %s help <command>
+
+`, "gocat", "gocat")
+}
+
+// printSubcommandHelp prints help for a specific subcommand.
+func printSubcommandHelp(cmd string) {
+	switch cmd {
 	case "join":
-		helpJoin()
-	case "split":
-		helpSplit()
-	default:
-		fmt.Fprintf(os.Stderr, "Unknown subcommand '%s' for help.\n", subcommand)
-		printGeneralUsage()
-	}
-}
+		fmt.Printf(`Usage: %s join [file or glob pattern] ...
 
-// helpJoin prints detailed help for the join command.
-func helpJoin() {
-	helpText := `Usage: gocat join [options] [file or glob pattern] ...
-Bundles files (and recursively includes Go dependencies) into a single stream.
+Joins the specified Go source file(s) into a single output stream,
+inserting delimiters between files. For each Go file, the tool parses its imports
+and recursively includes any files from packages within the same module (as determined by go.mod).
+Non-Go files are simply included as-is.
+Each file is included only once.
+
+Example:
+  %s join "main.go" "./pkg/*.go" -exclude-packages="expressions,lexer"
+
+`, "gocat", "gocat")
+	case "split":
+		fmt.Printf(`Usage: %s split [-in inputfile] [-out outputdirectory]
+
+Splits a joined file (or STDIN) into separate files using the inserted delimiters.
 
 Options:
-  -exclude-files     Comma-separated glob patterns for files to exclude.
-  -exclude-packages  Comma-separated package names (or prefixes) to exclude from recursive processing.
+  -in   Input file to split (if omitted, STDIN is used)
+  -out  Output directory for the extracted files (default: current directory)
 
-Behavior:
-  - Reads the go.mod file to extract the module name.
-  - Outputs a magic header ("// --------- gocat v1") as the first line.
-  - For each file or glob pattern match:
-      - For Go files: outputs a header delimiter, file content, then a footer delimiter.
-      - Parses Go files for import statements and recursively includes internal module files,
-        unless the package is excluded.
-      - For non-Go files: outputs a header delimiter, file content, then a footer delimiter.
-  - Uses a tracking mechanism to avoid duplicate file processing.
-`
-	fmt.Println(helpText)
-}
+Examples:
+  %s split -in joined.txt -out outputFolder
+  %s split -out outputFolder < joined.txt>
 
-// helpSplit prints detailed help for the split command.
-func helpSplit() {
-	helpText := `Usage: gocat split [-in inputfile] [-out outputdirectory]
-Splits a bundled stream (produced by gocat join) back into individual files.
-
-Behavior:
-  - Reads from the specified input file or standard input (if -in is not provided).
-  - Validates that the first line matches the magic header ("// --------- gocat v1").
-  - Processes header and footer delimiters to reconstruct the original file hierarchy.
-  - Validates output paths to remain within the designated output directory.
-`
-	fmt.Println(helpText)
+`, "gocat", "gocat", "gocat")
+	default:
+		fmt.Printf("Unknown help topic %q. Available topics: join, split\n", cmd)
+	}
 }
