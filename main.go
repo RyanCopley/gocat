@@ -1,3 +1,4 @@
+// gocat.go
 package main
 
 import (
@@ -11,6 +12,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +24,9 @@ const magicHeader = "// --------- gocat v1"
 var excludePackages []string
 var excludeFiles []string
 
+// Global variable for Java base package for recursive processing.
+var javaBase string
+
 func main() {
 	if len(os.Args) < 2 {
 		printGeneralHelp()
@@ -32,10 +37,12 @@ func main() {
 	switch command {
 	case "join":
 		joinCmd := flag.NewFlagSet("join", flag.ExitOnError)
-		// New flag for excluding packages by their package declaration.
+		// New flag for excluding packages by their package declaration (for Go files).
 		excludePkgs := joinCmd.String("exclude-packages", "", "Comma-separated package names to exclude (based on the file's package declaration)")
 		// New flag for excluding specific files.
 		excludeFilesFlag := joinCmd.String("exclude-files", "", "Comma-separated file patterns to exclude")
+		// New flag for Java: base package for recursive dependency resolution.
+		javaBaseFlag := joinCmd.String("java-base", "", "Base package for Java recursive dependency resolution")
 		if err := joinCmd.Parse(os.Args[2:]); err != nil {
 			log.Fatalf("Error parsing join command: %v", err)
 		}
@@ -54,8 +61,18 @@ func main() {
 				excludeFiles = append(excludeFiles, strings.TrimSpace(file))
 			}
 		}
+		// Set the Java base package.
+		javaBase = strings.TrimSpace(*javaBaseFlag)
+		if javaBase == "" {
+			// Attempt to auto-detect from pom.xml, build.gradle, or build.gradle.kts.
+			if jb, err := getJavaModuleName(); err == nil {
+				javaBase = jb
+			} else {
+				log.Printf("Warning: unable to auto-detect Java base package: %v", err)
+			}
+		}
 
-		// Read the module name from go.mod BEFORE producing any output.
+		// Read the Go module name from go.mod BEFORE producing any output.
 		moduleName, err := getModuleName()
 		if err != nil {
 			log.Fatalf("Error reading go.mod: %v", err)
@@ -127,7 +144,7 @@ func main() {
 	}
 }
 
-// getModuleName reads the module name from go.mod in the current directory.
+// getModuleName reads the Go module name from go.mod in the current directory.
 func getModuleName() (string, error) {
 	data, err := os.ReadFile("go.mod")
 	if err != nil {
@@ -146,15 +163,48 @@ func getModuleName() (string, error) {
 	return "", fmt.Errorf("module name not found in go.mod")
 }
 
-// getPackageName parses the Go file to extract its package declaration.
-func getPackageName(filePath string) (string, error) {
-	fset := token.NewFileSet()
-	// Parse only the package clause.
-	f, err := parser.ParseFile(fset, filePath, nil, parser.PackageClauseOnly)
-	if err != nil {
-		return "", err
+// getJavaModuleName attempts to extract the base package (group) from common Java build files.
+func getJavaModuleName() (string, error) {
+	// Try pom.xml first.
+	if _, err := os.Stat("pom.xml"); err == nil {
+		data, err := os.ReadFile("pom.xml")
+		if err != nil {
+			return "", err
+		}
+		re := regexp.MustCompile(`<groupId>\s*([^<\s]+)\s*</groupId>`)
+		matches := re.FindSubmatch(data)
+		if len(matches) >= 2 {
+			return string(matches[1]), nil
+		}
+		return "", fmt.Errorf("groupId not found in pom.xml")
 	}
-	return f.Name.Name, nil
+	// Try build.gradle.
+	if _, err := os.Stat("build.gradle"); err == nil {
+		data, err := os.ReadFile("build.gradle")
+		if err != nil {
+			return "", err
+		}
+		re := regexp.MustCompile(`(?m)^\s*group\s*=\s*['"]([^'"]+)['"]`)
+		matches := re.FindSubmatch(data)
+		if len(matches) >= 2 {
+			return string(matches[1]), nil
+		}
+		return "", fmt.Errorf("group not found in build.gradle")
+	}
+	// Try build.gradle.kts.
+	if _, err := os.Stat("build.gradle.kts"); err == nil {
+		data, err := os.ReadFile("build.gradle.kts")
+		if err != nil {
+			return "", err
+		}
+		re := regexp.MustCompile(`(?m)^\s*group\s*=\s*["']([^"']+)["']`)
+		matches := re.FindSubmatch(data)
+		if len(matches) >= 2 {
+			return string(matches[1]), nil
+		}
+		return "", fmt.Errorf("group not found in build.gradle.kts")
+	}
+	return "", fmt.Errorf("no recognized Java build file found")
 }
 
 // isExcludedFile checks if the file (by its relative path) matches any exclusion pattern.
@@ -167,7 +217,7 @@ func isExcludedFile(relPath string) bool {
 	return false
 }
 
-// processFile processes any file. For Go files, it handles them recursively.
+// processFile processes any file. For Go or Java files, it handles them (possibly recursively).
 // The output is written to w.
 func processFile(filePath, moduleName string, processed map[string]bool, w io.Writer) error {
 	filePath = filepath.Clean(filePath)
@@ -199,8 +249,9 @@ func processFile(filePath, moduleName string, processed map[string]bool, w io.Wr
 	}
 	processed[absPath] = true
 
-	if filepath.Ext(filePath) == ".go" {
-		// Check the package declaration against the excluded packages.
+	switch filepath.Ext(filePath) {
+	case ".go":
+		// For Go files, check package exclusion.
 		if len(excludePackages) > 0 {
 			pkg, err := getPackageName(filePath)
 			if err != nil {
@@ -214,8 +265,23 @@ func processFile(filePath, moduleName string, processed map[string]bool, w io.Wr
 			}
 		}
 		return processGoFile(filePath, moduleName, processed, w)
+	case ".java":
+		// For Java files, do not rely on a package line—use recursive import scanning.
+		return processJavaFile(filePath, javaBase, processed, w)
+	default:
+		return processNonGoFile(filePath, w)
 	}
-	return processNonGoFile(filePath, w)
+}
+
+// getPackageName parses the Go file to extract its package declaration.
+func getPackageName(filePath string) (string, error) {
+	fset := token.NewFileSet()
+	// Parse only the package clause.
+	f, err := parser.ParseFile(fset, filePath, nil, parser.PackageClauseOnly)
+	if err != nil {
+		return "", err
+	}
+	return f.Name.Name, nil
 }
 
 // processGoFile processes a Go source file by printing its header, content, and footer,
@@ -310,6 +376,103 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 				log.Printf("Error processing %s: %v", fileInPkg, err)
 			}
 		}
+	}
+	return nil
+}
+
+// processJavaFile processes a Java source file by printing its header, content, and footer,
+// then scanning its content for import statements to recursively include internal files
+// if they belong to the specified base package.
+func processJavaFile(filePath, base string, processed map[string]bool, w io.Writer) error {
+	filePath = filepath.Clean(filePath)
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return err
+	}
+	relPath, err := filepath.Rel(".", absPath)
+	if err != nil {
+		relPath = filePath
+	}
+
+	// Get file info for metadata.
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return err
+	}
+	modTime := info.ModTime().Format(time.RFC3339)
+
+	// Print header.
+	fmt.Fprintf(w, "// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
+
+	// Open the file and output its contents.
+	f, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(w, f); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		log.Printf("Error closing file %s: %v", filePath, err)
+	}
+
+	// Print footer.
+	fmt.Fprintf(w, "// --------- FILE END: \"%s\" ----------\n", relPath)
+
+	// Re-open the file for scanning import statements.
+	f2, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer f2.Close()
+
+	scanner := bufio.NewScanner(f2)
+	// Regular expression to match Java import lines.
+	importRegex := regexp.MustCompile(`^\s*import\s+([a-zA-Z0-9_.]+);`)
+	for scanner.Scan() {
+		line := scanner.Text()
+		matches := importRegex.FindStringSubmatch(line)
+		if matches == nil {
+			continue
+		}
+		importPath := matches[1]
+		// Only process imports that start with the specified base.
+		if importPath == base || strings.HasPrefix(importPath, base+".") {
+			var relDir string
+			if importPath == base {
+				relDir = "."
+			} else {
+				relDir = strings.TrimPrefix(importPath, base+".")
+				// Convert package dots to directory separators.
+				relDir = filepath.FromSlash(strings.ReplaceAll(relDir, ".", "/"))
+			}
+			packageDir := filepath.Join(".", relDir)
+			packageDir = filepath.Clean(packageDir)
+
+			entries, err := os.ReadDir(packageDir)
+			if err != nil {
+				log.Printf("Error reading directory %q: %v", packageDir, err)
+				continue
+			}
+			for _, entry := range entries {
+				if entry.IsDir() {
+					continue
+				}
+				// Only process .java files.
+				if filepath.Ext(entry.Name()) != ".java" {
+					continue
+				}
+				fileInPkg := filepath.Join(packageDir, entry.Name())
+				fileInPkg = filepath.Clean(fileInPkg)
+				if err := processFile(fileInPkg, base, processed, w); err != nil {
+					log.Printf("Error processing %s: %v", fileInPkg, err)
+				}
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -450,9 +613,9 @@ func printGeneralHelp() {
 	fmt.Printf(`Usage: %s <command> [options]
 
 Commands:
-  join    Join Go source files (and their internal module dependencies) into a single stream.
-          Non-Go files are included as-is.
-  split   Split a joined file into separate source (or non-source) files.
+  join    Join source files (and their internal module dependencies) into a single stream.
+          Non-source files are included as-is.
+  split   Split a joined file into separate files.
   help    Show help information.
 
 For detailed help on a command, run:
@@ -467,15 +630,16 @@ func printSubcommandHelp(cmd string) {
 	case "join":
 		fmt.Printf(`Usage: %s join [file or glob pattern] ...
 
-Joins the specified Go source file(s) into a single output stream,
-inserting delimiters between files. For each Go file, the tool parses its imports
+Joins the specified source file(s) into a single output stream,
+inserting delimiters between files. For Go files, the tool parses its imports
 and recursively includes any files from packages within the same module (as determined by go.mod).
-Non-Go files are simply included as-is.
+For Java files, if a base package is provided via -java-base (or auto-detected from a build file),
+recursive inclusion is performed by scanning for import statements.
+Non-source files are simply included as-is.
 Each file is included only once.
 
 Example:
-  %s join "main.go" "./pkg/*.go" -exclude-packages="expressions,lexer" -exclude-files="vendor/*,testdata/*"
-
+  %s join "main.go" "./pkg/*.go" -exclude-packages="expressions,lexer" -exclude-files="vendor/*,testdata/*" -java-base="com.example"
 `, "gocat", "gocat")
 	case "split":
 		fmt.Printf(`Usage: %s split [-in inputfile] [-out outputdirectory]
@@ -489,7 +653,6 @@ Options:
 Examples:
   %s split -in joined.txt -out outputFolder
   %s split -out outputFolder < joined.txt>
-
 `, "gocat", "gocat", "gocat")
 	default:
 		fmt.Printf("Unknown help topic %q. Available topics: join, split\n", cmd)
