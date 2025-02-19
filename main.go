@@ -17,8 +17,9 @@ import (
 
 const magicHeader = "// --------- gocat v1"
 
-// Global variable for excluded package names.
+// Global variables for exclusion filters.
 var excludePackages []string
+var excludeFiles []string
 
 func main() {
 	if len(os.Args) < 2 {
@@ -32,6 +33,8 @@ func main() {
 		joinCmd := flag.NewFlagSet("join", flag.ExitOnError)
 		// New flag for excluding packages by their package declaration.
 		excludePkgs := joinCmd.String("exclude-packages", "", "Comma-separated package names to exclude (based on the file's package declaration)")
+		// New flag for excluding specific files.
+		excludeFilesFlag := joinCmd.String("exclude-files", "", "Comma-separated file patterns to exclude")
 		if err := joinCmd.Parse(os.Args[2:]); err != nil {
 			log.Fatalf("Error parsing join command: %v", err)
 		}
@@ -42,6 +45,12 @@ func main() {
 		if *excludePkgs != "" {
 			for _, pkg := range strings.Split(*excludePkgs, ",") {
 				excludePackages = append(excludePackages, strings.TrimSpace(pkg))
+			}
+		}
+		// Process the exclude-files flag.
+		if *excludeFilesFlag != "" {
+			for _, file := range strings.Split(*excludeFilesFlag, ",") {
+				excludeFiles = append(excludeFiles, strings.TrimSpace(file))
 			}
 		}
 
@@ -144,6 +153,16 @@ func getPackageName(filePath string) (string, error) {
 	return f.Name.Name, nil
 }
 
+// isExcludedFile checks if the file (by its relative path) matches any exclusion pattern.
+func isExcludedFile(relPath string) bool {
+	for _, pattern := range excludeFiles {
+		if match, err := filepath.Match(pattern, relPath); err == nil && match {
+			return true
+		}
+	}
+	return false
+}
+
 // processFile is the unified function for processing any file.
 // If the file is a Go file, it processes it (and its imports) recursively.
 // Otherwise, it simply outputs the file.
@@ -154,6 +173,16 @@ func processFile(filePath, moduleName string, processed map[string]bool) error {
 	if err != nil {
 		return err
 	}
+
+	// Check for file exclusion based on relative path.
+	relPath, err := filepath.Rel(".", absPath)
+	if err != nil {
+		relPath = filePath
+	}
+	if isExcludedFile(relPath) {
+		return nil
+	}
+
 	// Avoid processing the same file more than once.
 	if processed[absPath] {
 		return nil
@@ -440,7 +469,7 @@ Non-Go files are simply included as-is.
 Each file is included only once.
 
 Example:
-  %s join "main.go" "./pkg/*.go" -exclude-packages="expressions,lexer"
+  %s join "main.go" "./pkg/*.go" -exclude-packages="expressions,lexer" -exclude-files="vendor/*,testdata/*"
 
 `, "gocat", "gocat")
 	case "split":
