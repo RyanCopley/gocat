@@ -28,7 +28,7 @@ jobs:
           mkdir -p build_output
 
           # Define the output binary name (append .exe for Windows)
-          output_name="lql"
+          output_name="${{ github.event.repository.name }}"
           if [ "${{ matrix.goos }}" = "windows" ]; then
             output_name="${output_name}.exe"
           fi
