@@ -1,12 +1,8 @@
-Below is a formal specification document for **gocat**. This document describes the intended behavior, input/output formats, algorithms, error handling, and all other aspects of the program in exhaustive detail.
-
----
-
 # Gocat Formal Specification
 
-**Version:** 1.0  
-**Date:** 2025-02-18  
-**Author:** [Your Name]
+**Version:** 0.1
+**Date:** 2025-02-18
+**Author:** Ryan Copley
 
 ---
 
