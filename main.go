@@ -302,7 +302,7 @@ func checkForUpdates(moduleName string) {
 	if currentVer.LessThan(latestVer) {
 		fmt.Fprintf(os.Stderr, "Update available: version %s is available (you are using %s).\n", rel.TagName, version)
 		fmt.Fprintf(os.Stderr, "%s\n", rel.Body)
-		fmt.Fprintf(os.Stderr, "https://github.com/RyanCopley/gocat/compare/%s...%s\n", version, rel.TagName)
+		fmt.Fprintf(os.Stderr, "https://github.com/%s/%s/compare/%s...%s\n", repoOwner, repoName, version, rel.TagName)
 	}
 }
 
