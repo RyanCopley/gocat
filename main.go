@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -52,11 +53,12 @@ func main() {
 
 	// For commands other than "join", check for updates.
 	if command != "join" {
-		modName, err := getModuleName()
+		// Use build info to get the module name for update checking.
+		modNameForUpdate, err := getModuleNameForUpdater()
 		if err != nil {
 			log.Printf("Update check skipped: %v", err)
 		} else {
-			checkForUpdates(modName)
+			checkForUpdates(modNameForUpdate)
 		}
 	}
 
@@ -93,13 +95,13 @@ func main() {
 				log.Printf("Warning: unable to auto-detect Java base package: %v", err)
 			}
 		}
-		// Determine Go module name.
+		// Determine Go module name from the local go.mod.
 		var moduleName string
 		if *goBaseFlag != "" {
 			moduleName = strings.TrimSpace(*goBaseFlag)
 		} else {
 			var err error
-			moduleName, err = getModuleName()
+			moduleName, err = getGoModuleName()
 			if err != nil {
 				log.Fatalf("Error reading go.mod: %v", err)
 			}
@@ -168,60 +170,22 @@ func main() {
 	}
 }
 
-// checkForUpdates queries GitHub for the latest release and prints a banner with release notes
-// if the current version is outdated. It derives the repository info from the module name.
-func checkForUpdates(moduleName string) {
-	// Expect moduleName in the form "github.com/username/reponame"
-	if !strings.HasPrefix(moduleName, "github.com/") {
-		log.Printf("Update check skipped: module %q is not hosted on GitHub", moduleName)
-		return
+// getModuleNameForUpdater retrieves the module path from the build info.
+// This is used exclusively by the update checker.
+func getModuleNameForUpdater() (string, error) {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "", fmt.Errorf("failed to read build info")
 	}
-	parts := strings.Split(moduleName, "/")
-	if len(parts) < 3 {
-		log.Printf("Update check skipped: module %q is not in expected format", moduleName)
-		return
+	if bi.Main.Path == "" {
+		return "", fmt.Errorf("module path not found in build info")
 	}
-	repoOwner := parts[1]
-	repoName := parts[2]
-	
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName)
-	resp, err := http.Get(url)
-	if err != nil {
-		log.Printf("Update check failed: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("Update check returned status %d", resp.StatusCode)
-		return
-	}
-	var rel struct {
-		TagName string `json:"tag_name"`
-		Body    string `json:"body"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		log.Printf("Failed to decode update info: %v", err)
-		return
-	}
-	// Use semver to compare versions.
-	currentVer, err := semver.NewVersion(strings.TrimPrefix(version, "v"))
-	if err != nil {
-		log.Printf("Invalid current version format: %v", err)
-		return
-	}
-	latestVer, err := semver.NewVersion(strings.TrimPrefix(rel.TagName, "v"))
-	if err != nil {
-		log.Printf("Invalid latest version format: %v", err)
-		return
-	}
-	if currentVer.LessThan(latestVer) {
-		fmt.Fprintf(os.Stderr, "Update available: version %s is available (you are using %s).\n", rel.TagName, version)
-		fmt.Fprintf(os.Stderr, "Release notes:\n%s\n", rel.Body)
-	}
+	return bi.Main.Path, nil
 }
 
-// getModuleName reads the Go module name from go.mod in the current directory.
-func getModuleName() (string, error) {
+// getGoModuleName reads the Go module name from the go.mod file in the current directory.
+// This is used for processing files.
+func getGoModuleName() (string, error) {
 	data, err := os.ReadFile("go.mod")
 	if err != nil {
 		return "", err
@@ -280,6 +244,56 @@ func getJavaModuleName() (string, error) {
 	return "", fmt.Errorf("no recognized Java build file found")
 }
 
+// checkForUpdates queries GitHub for the latest release and prints a banner with release notes
+// if the current version is outdated. It derives the repository info from the module name.
+func checkForUpdates(moduleName string) {
+	// Expect moduleName in the form "github.com/username/reponame"
+	if !strings.HasPrefix(moduleName, "github.com/") {
+		log.Printf("Update check skipped: module %q is not hosted on GitHub", moduleName)
+		return
+	}
+	parts := strings.Split(moduleName, "/")
+	if len(parts) < 3 {
+		log.Printf("Update check skipped: module %q is not in expected format", moduleName)
+		return
+	}
+	repoOwner := parts[1]
+	repoName := parts[2]
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName) // #nosec G107
+	resp, err := http.Get(url)
+	if err != nil {
+		log.Printf("Update check failed: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Update check returned status %d", resp.StatusCode)
+		return
+	}
+	var rel struct {
+		TagName string `json:"tag_name"`
+		Body    string `json:"body"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		log.Printf("Failed to decode update info: %v", err)
+		return
+	}
+	currentVer, err := semver.NewVersion(strings.TrimPrefix(version, "v"))
+	if err != nil {
+		log.Printf("Invalid current version format: %v", err)
+		return
+	}
+	latestVer, err := semver.NewVersion(strings.TrimPrefix(rel.TagName, "v"))
+	if err != nil {
+		log.Printf("Invalid latest version format: %v", err)
+		return
+	}
+	if currentVer.LessThan(latestVer) {
+		fmt.Fprintf(os.Stderr, "Update available: version %s is available (you are using %s).\n", rel.TagName, version)
+		fmt.Fprintf(os.Stderr, "Release notes:\n%s\n", rel.Body)
+	}
+}
+
 // isExcludedFile checks if the file (by its relative path) matches any exclusion pattern.
 func isExcludedFile(relPath string) bool {
 	for _, pattern := range excludeFiles {
@@ -320,7 +334,7 @@ func processFile(filePath, moduleName string, processed map[string]bool, w io.Wr
 	switch filepath.Ext(filePath) {
 	case ".go":
 		if len(excludePackages) > 0 {
-			pkg, err := getPackageName(filePath)
+			pkg, err := getGoPackageName(filePath)
 			if err != nil {
 				log.Printf("Warning: unable to determine package for %s: %v", filePath, err)
 			} else {
@@ -337,12 +351,12 @@ func processFile(filePath, moduleName string, processed map[string]bool, w io.Wr
 	case ".kt", ".kts":
 		return processKotlinFile(filePath, javaBase, processed, w)
 	default:
-		return processNonGoFile(filePath, w)
+		return processNonSourceFile(filePath, w)
 	}
 }
 
-// getPackageName parses the Go file to extract its package declaration.
-func getPackageName(filePath string) (string, error) {
+// getGoPackageName parses the Go file to extract its package declaration.
+func getGoPackageName(filePath string) (string, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, filePath, nil, parser.PackageClauseOnly)
 	if err != nil {
@@ -590,8 +604,8 @@ func processKotlinFile(filePath, base string, processed map[string]bool, w io.Wr
 	return nil
 }
 
-// processNonGoFile outputs a non-source file with header and footer delimiters.
-func processNonGoFile(filePath string, w io.Writer) error {
+// processNonSourceFile outputs a non-source file with header and footer delimiters.
+func processNonSourceFile(filePath string, w io.Writer) error {
 	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
