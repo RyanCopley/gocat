@@ -3,12 +3,14 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"go/parser"
 	"go/token"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -23,16 +25,22 @@ const (
 	fileEndFormat   = "// --------- FILE END: \"%s\" ----------\n"
 	fileStartPrefix = "// --------- FILE START: "
 	fileEndPrefix   = "// --------- FILE END: "
+	// GitHub repository info (change these to match your public repo)
+	repoOwner = "yourusername"
+	repoName  = "gocat"
 )
 
-var version string = "dev"
+var (
+	// version is set via ldflags (default "dev")
+	version string = "dev"
 
-// Global variables for exclusion filters.
-var excludePackages []string
-var excludeFiles []string
+	// Global variables for exclusion filters.
+	excludePackages []string
+	excludeFiles    []string
 
-// Global variable for base package used for recursive dependency resolution for Java/Kotlin.
-var javaBase string
+	// Global variable for base package used for Java/Kotlin dependency resolution.
+	javaBase string
+)
 
 func main() {
 	if len(os.Args) < 2 {
@@ -41,16 +49,18 @@ func main() {
 	}
 
 	command := os.Args[1]
+
+	// Do not check for updates if running join (to avoid breaking streaming output)
+	if command != "join" {
+		checkForUpdates()
+	}
+
 	switch command {
 	case "join":
 		joinCmd := flag.NewFlagSet("join", flag.ExitOnError)
-		// Flag for excluding packages (for Go files).
 		excludePkgs := joinCmd.String("exclude-packages", "", "Comma-separated package names to exclude (based on the file's package declaration)")
-		// Flag for excluding specific files.
 		excludeFilesFlag := joinCmd.String("exclude-files", "", "Comma-separated file patterns to exclude")
-		// Flag for Java/Kotlin: base package for recursive dependency resolution.
 		javaBaseFlag := joinCmd.String("java-base", "", "Base package for Java/Kotlin recursive dependency resolution")
-		// Flag for Go: base module for recursive dependency resolution.
 		goBaseFlag := joinCmd.String("go-base", "", "Base module for Go recursive dependency resolution (overrides go.mod)")
 		if err := joinCmd.Parse(os.Args[2:]); err != nil {
 			log.Fatalf("Error parsing join command: %v", err)
@@ -58,22 +68,18 @@ func main() {
 		if joinCmd.NArg() == 0 {
 			log.Fatal("Usage: join [file or glob pattern] ...")
 		}
-		// Process the exclude-packages flag.
 		if *excludePkgs != "" {
 			for _, pkg := range strings.Split(*excludePkgs, ",") {
 				excludePackages = append(excludePackages, strings.TrimSpace(pkg))
 			}
 		}
-		// Process the exclude-files flag.
 		if *excludeFilesFlag != "" {
 			for _, file := range strings.Split(*excludeFilesFlag, ",") {
 				excludeFiles = append(excludeFiles, strings.TrimSpace(file))
 			}
 		}
-		// Set the Java/Kotlin base package.
 		javaBase = strings.TrimSpace(*javaBaseFlag)
 		if javaBase == "" {
-			// Attempt to auto-detect from common build files.
 			if jb, err := getJavaModuleName(); err == nil {
 				javaBase = jb
 			} else {
@@ -81,7 +87,6 @@ func main() {
 			}
 		}
 
-		// Determine the Go module name.
 		var moduleName string
 		if *goBaseFlag != "" {
 			moduleName = strings.TrimSpace(*goBaseFlag)
@@ -93,7 +98,6 @@ func main() {
 			}
 		}
 
-		// Buffer the output so we only print the magic header if some files are processed.
 		var buf bytes.Buffer
 		processed := make(map[string]bool)
 		for _, pattern := range joinCmd.Args() {
@@ -114,7 +118,6 @@ func main() {
 				}
 			}
 		}
-		// Only output if the buffer is non-empty.
 		if buf.Len() > 0 {
 			fmt.Println(magicHeader)
 			fmt.Print(buf.String())
@@ -126,7 +129,6 @@ func main() {
 		if err := splitCmd.Parse(os.Args[2:]); err != nil {
 			log.Fatalf("Error parsing split command: %v", err)
 		}
-
 		var in io.Reader
 		if *inputFile != "" {
 			*inputFile = filepath.Clean(*inputFile)
@@ -159,6 +161,62 @@ func main() {
 	}
 }
 
+// checkForUpdates queries the GitHub API for the latest release and prints a banner
+// if the current version is outdated.
+func checkForUpdates() {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName)
+	resp, err := http.Get(url)
+	if err != nil {
+		log.Printf("Update check failed: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Update check returned status %d", resp.StatusCode)
+		return
+	}
+
+	var rel struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		log.Printf("Failed to decode update info: %v", err)
+		return
+	}
+
+	if isOutdated(version, rel.TagName) {
+		fmt.Fprintf(os.Stderr, "Update available: version %s is available (you are using %s). Please update!\n", rel.TagName, version)
+	}
+}
+
+// isOutdated compares semantic versions (assumes a 'v' prefix) and returns true if current is older than latest.
+func isOutdated(current, latest string) bool {
+	trim := func(s string) string {
+		return strings.TrimPrefix(s, "v")
+	}
+	curParts := strings.Split(trim(current), ".")
+	latParts := strings.Split(trim(latest), ".")
+	n := len(curParts)
+	if len(latParts) < n {
+		n = len(latParts)
+	}
+	for i := 0; i < n; i++ {
+		c, err1 := strconv.Atoi(curParts[i])
+		l, err2 := strconv.Atoi(latParts[i])
+		if err1 != nil || err2 != nil {
+			// Fallback to string comparison if parsing fails.
+			return current < latest
+		}
+		if c < l {
+			return true
+		} else if c > l {
+			return false
+		}
+	}
+	return len(latParts) > len(curParts)
+}
+
 // getModuleName reads the Go module name from go.mod in the current directory.
 func getModuleName() (string, error) {
 	data, err := os.ReadFile("go.mod")
@@ -180,7 +238,6 @@ func getModuleName() (string, error) {
 
 // getJavaModuleName attempts to extract the base package (group) from common Java build files.
 func getJavaModuleName() (string, error) {
-	// Try pom.xml first.
 	if _, err := os.Stat("pom.xml"); err == nil {
 		data, err := os.ReadFile("pom.xml")
 		if err != nil {
@@ -193,7 +250,6 @@ func getJavaModuleName() (string, error) {
 		}
 		return "", fmt.Errorf("groupId not found in pom.xml")
 	}
-	// Try build.gradle.
 	if _, err := os.Stat("build.gradle"); err == nil {
 		data, err := os.ReadFile("build.gradle")
 		if err != nil {
@@ -206,7 +262,6 @@ func getJavaModuleName() (string, error) {
 		}
 		return "", fmt.Errorf("group not found in build.gradle")
 	}
-	// Try build.gradle.kts.
 	if _, err := os.Stat("build.gradle.kts"); err == nil {
 		data, err := os.ReadFile("build.gradle.kts")
 		if err != nil {
@@ -236,7 +291,6 @@ func isExcludedFile(relPath string) bool {
 // The output is written to w.
 func processFile(filePath, moduleName string, processed map[string]bool, w io.Writer) error {
 	filePath = filepath.Clean(filePath)
-	// Check if the file exists.
 	if _, err := os.Stat(filePath); err != nil {
 		if os.IsNotExist(err) {
 			log.Printf("File not found: %s", filePath)
@@ -249,8 +303,6 @@ func processFile(filePath, moduleName string, processed map[string]bool, w io.Wr
 	if err != nil {
 		return err
 	}
-
-	// Check for file exclusion based on relative path.
 	relPath, err := filepath.Rel(".", absPath)
 	if err != nil {
 		relPath = filePath
@@ -258,7 +310,6 @@ func processFile(filePath, moduleName string, processed map[string]bool, w io.Wr
 	if isExcludedFile(relPath) {
 		return nil
 	}
-
 	if processed[absPath] {
 		return nil
 	}
@@ -266,7 +317,6 @@ func processFile(filePath, moduleName string, processed map[string]bool, w io.Wr
 
 	switch filepath.Ext(filePath) {
 	case ".go":
-		// For Go files, check package exclusion.
 		if len(excludePackages) > 0 {
 			pkg, err := getPackageName(filePath)
 			if err != nil {
@@ -281,10 +331,8 @@ func processFile(filePath, moduleName string, processed map[string]bool, w io.Wr
 		}
 		return processGoFile(filePath, moduleName, processed, w)
 	case ".java":
-		// Process Java files using import scanning.
 		return processJavaFile(filePath, javaBase, processed, w)
 	case ".kt", ".kts":
-		// Process Kotlin files using import scanning.
 		return processKotlinFile(filePath, javaBase, processed, w)
 	default:
 		return processNonGoFile(filePath, w)
@@ -294,7 +342,6 @@ func processFile(filePath, moduleName string, processed map[string]bool, w io.Wr
 // getPackageName parses the Go file to extract its package declaration.
 func getPackageName(filePath string) (string, error) {
 	fset := token.NewFileSet()
-	// Parse only the package clause.
 	f, err := parser.ParseFile(fset, filePath, nil, parser.PackageClauseOnly)
 	if err != nil {
 		return "", err
@@ -302,8 +349,7 @@ func getPackageName(filePath string) (string, error) {
 	return f.Name.Name, nil
 }
 
-// processGoFile processes a Go source file by printing its header, content, and footer,
-// then parsing its import statements to recursively include any internal files.
+// processGoFile processes a Go source file.
 func processGoFile(filePath, moduleName string, processed map[string]bool, w io.Writer) error {
 	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
@@ -314,14 +360,12 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 	if err != nil {
 		relPath = filePath
 	}
-
 	info, err := os.Stat(filePath)
 	if err != nil {
 		return err
 	}
 	modTime := info.ModTime().Format(time.RFC3339)
 	fmt.Fprintf(w, fileStartFormat, relPath, info.Size(), modTime)
-
 	f, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -333,9 +377,7 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 	if err := f.Close(); err != nil {
 		log.Printf("Error closing file %s: %v", filePath, err)
 	}
-
 	fmt.Fprintf(w, fileEndFormat, relPath)
-
 	f2, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -387,9 +429,7 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 	return nil
 }
 
-// processJavaFile processes a Java source file by printing its header, content, and footer,
-// then scanning its content for import statements to recursively include internal files
-// if they belong to the specified base package.
+// processJavaFile processes a Java source file.
 func processJavaFile(filePath, base string, processed map[string]bool, w io.Writer) error {
 	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
@@ -406,7 +446,6 @@ func processJavaFile(filePath, base string, processed map[string]bool, w io.Writ
 	}
 	modTime := info.ModTime().Format(time.RFC3339)
 	fmt.Fprintf(w, fileStartFormat, relPath, info.Size(), modTime)
-
 	f, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -419,7 +458,6 @@ func processJavaFile(filePath, base string, processed map[string]bool, w io.Writ
 		log.Printf("Error closing file %s: %v", filePath, err)
 	}
 	fmt.Fprintf(w, fileEndFormat, relPath)
-
 	f2, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -470,9 +508,7 @@ func processJavaFile(filePath, base string, processed map[string]bool, w io.Writ
 	return nil
 }
 
-// processKotlinFile processes a Kotlin source file (.kt or .kts) by printing its header, content, and footer,
-// then scanning its content for import statements to recursively include internal files
-// if they belong to the specified base package.
+// processKotlinFile processes a Kotlin source file (.kt or .kts).
 func processKotlinFile(filePath, base string, processed map[string]bool, w io.Writer) error {
 	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
@@ -489,7 +525,6 @@ func processKotlinFile(filePath, base string, processed map[string]bool, w io.Wr
 	}
 	modTime := info.ModTime().Format(time.RFC3339)
 	fmt.Fprintf(w, fileStartFormat, relPath, info.Size(), modTime)
-
 	f, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -502,7 +537,6 @@ func processKotlinFile(filePath, base string, processed map[string]bool, w io.Wr
 		log.Printf("Error closing file %s: %v", filePath, err)
 	}
 	fmt.Fprintf(w, fileEndFormat, relPath)
-
 	f2, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -554,7 +588,7 @@ func processKotlinFile(filePath, base string, processed map[string]bool, w io.Wr
 	return nil
 }
 
-// processNonGoFile prints a non-Go file with the appropriate header, content, and footer.
+// processNonGoFile outputs a non-source file with header and footer delimiters.
 func processNonGoFile(filePath string, w io.Writer) error {
 	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
@@ -571,7 +605,6 @@ func processNonGoFile(filePath string, w io.Writer) error {
 	}
 	modTime := info.ModTime().Format(time.RFC3339)
 	fmt.Fprintf(w, fileStartFormat, relPath, info.Size(), modTime)
-
 	f, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -669,15 +702,13 @@ func splitInput(r io.Reader, outDir string) error {
 	return nil
 }
 
-// printGeneralHelp prints the general usage message.
-
+// printGeneralHelp prints the general usage message with the version.
 func printGeneralHelp() {
-    fmt.Printf(`gocat %s
-Usage: %s <command> [options]
+	fmt.Printf(`gocat %s
+Usage: %s <command> [options] [arguments]
 
 Commands:
-  join    Join source files (and their internal module dependencies) into a single stream.
-          Non-source files are included as-is.
+  join    Join source files (and their internal dependencies) into a single stream.
   split   Split a joined file into separate files.
   help    Show help information.
 
@@ -694,10 +725,10 @@ func printSubcommandHelp(cmd string) {
 		fmt.Printf(`Usage: %s join [file or glob pattern] ...
 
 Joins the specified source file(s) into a single output stream,
-inserting delimiters between files. For Go files, the tool parses its imports
-and recursively includes any files from packages within the same module (as determined by go.mod or -go-base).
-For Java/Kotlin files, if a base package is provided via -java-base (or auto-detected from a build file),
-recursive inclusion is performed by scanning for import statements.
+inserting delimiters between files. For Go files, the tool parses import statements
+and recursively includes any files from packages within the same module (from go.mod or -go-base).
+For Java/Kotlin files, if a base package is provided via -java-base (or auto-detected), recursive inclusion is performed
+by scanning for import statements.
 Non-source files are simply included as-is.
 Each file is included only once.
 
