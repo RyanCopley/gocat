@@ -54,7 +54,7 @@ func main() {
 	// For commands other than "join", check for updates.
 	if command != "join" {
 		// Use build info to get the module name for update checking.
-		modNameForUpdate, err := getModuleNameForUpdate()
+		modNameForUpdate, err := getModuleNameForUpdater()
 		if err != nil {
 			log.Printf("Update check skipped: %v", err)
 		} else {
@@ -101,7 +101,7 @@ func main() {
 			moduleName = strings.TrimSpace(*goBaseFlag)
 		} else {
 			var err error
-			moduleName, err = getModuleNameFromCWD()
+			moduleName, err = getGoModuleName()
 			if err != nil {
 				log.Fatalf("Error reading go.mod: %v", err)
 			}
@@ -170,9 +170,9 @@ func main() {
 	}
 }
 
-// getModuleNameForUpdate retrieves the module path from the build info.
+// getModuleNameForUpdater retrieves the module path from the build info.
 // This is used exclusively by the update checker.
-func getModuleNameForUpdate() (string, error) {
+func getModuleNameForUpdater() (string, error) {
 	bi, ok := debug.ReadBuildInfo()
 	if !ok {
 		return "", fmt.Errorf("failed to read build info")
@@ -183,9 +183,9 @@ func getModuleNameForUpdate() (string, error) {
 	return bi.Main.Path, nil
 }
 
-// getModuleNameFromCWD reads the Go module name from the go.mod file in the current directory.
+// getGoModuleName reads the Go module name from the go.mod file in the current directory.
 // This is used for processing files.
-func getModuleNameFromCWD() (string, error) {
+func getGoModuleName() (string, error) {
 	data, err := os.ReadFile("go.mod")
 	if err != nil {
 		return "", err
@@ -334,7 +334,7 @@ func processFile(filePath, moduleName string, processed map[string]bool, w io.Wr
 	switch filepath.Ext(filePath) {
 	case ".go":
 		if len(excludePackages) > 0 {
-			pkg, err := getPackageName(filePath)
+			pkg, err := getGoPackageName(filePath)
 			if err != nil {
 				log.Printf("Warning: unable to determine package for %s: %v", filePath, err)
 			} else {
@@ -351,12 +351,12 @@ func processFile(filePath, moduleName string, processed map[string]bool, w io.Wr
 	case ".kt", ".kts":
 		return processKotlinFile(filePath, javaBase, processed, w)
 	default:
-		return processNonGoFile(filePath, w)
+		return processNonSourceFile(filePath, w)
 	}
 }
 
-// getPackageName parses the Go file to extract its package declaration.
-func getPackageName(filePath string) (string, error) {
+// getGoPackageName parses the Go file to extract its package declaration.
+func getGoPackageName(filePath string) (string, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, filePath, nil, parser.PackageClauseOnly)
 	if err != nil {
@@ -604,8 +604,8 @@ func processKotlinFile(filePath, base string, processed map[string]bool, w io.Wr
 	return nil
 }
 
-// processNonGoFile outputs a non-source file with header and footer delimiters.
-func processNonGoFile(filePath string, w io.Writer) error {
+// processNonSourceFile outputs a non-source file with header and footer delimiters.
+func processNonSourceFile(filePath string, w io.Writer) error {
 	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
