@@ -17,7 +17,13 @@ import (
 	"time"
 )
 
-const magicHeader = "// --------- gocat v1"
+const (
+	magicHeader     = "// --------- gocat v1"
+	fileStartFormat = "// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n"
+	fileEndFormat   = "// --------- FILE END: \"%s\" ----------\n"
+	fileStartPrefix = "// --------- FILE START: "
+	fileEndPrefix   = "// --------- FILE END: "
+)
 
 // Global variables for exclusion filters.
 var excludePackages []string
@@ -42,7 +48,7 @@ func main() {
 		excludeFilesFlag := joinCmd.String("exclude-files", "", "Comma-separated file patterns to exclude")
 		// Flag for Java/Kotlin: base package for recursive dependency resolution.
 		javaBaseFlag := joinCmd.String("java-base", "", "Base package for Java/Kotlin recursive dependency resolution")
-		// New flag for Go: base module for recursive dependency resolution.
+		// Flag for Go: base module for recursive dependency resolution.
 		goBaseFlag := joinCmd.String("go-base", "", "Base module for Go recursive dependency resolution (overrides go.mod)")
 		if err := joinCmd.Parse(os.Args[2:]); err != nil {
 			log.Fatalf("Error parsing join command: %v", err)
@@ -312,7 +318,8 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 		return err
 	}
 	modTime := info.ModTime().Format(time.RFC3339)
-	fmt.Fprintf(w, "// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
+	fmt.Fprintf(w, fileStartFormat, relPath, info.Size(), modTime)
+
 	f, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -324,7 +331,9 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 	if err := f.Close(); err != nil {
 		log.Printf("Error closing file %s: %v", filePath, err)
 	}
-	fmt.Fprintf(w, "// --------- FILE END: \"%s\" ----------\n", relPath)
+
+	fmt.Fprintf(w, fileEndFormat, relPath)
+
 	f2, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -394,7 +403,8 @@ func processJavaFile(filePath, base string, processed map[string]bool, w io.Writ
 		return err
 	}
 	modTime := info.ModTime().Format(time.RFC3339)
-	fmt.Fprintf(w, "// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
+	fmt.Fprintf(w, fileStartFormat, relPath, info.Size(), modTime)
+
 	f, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -406,7 +416,8 @@ func processJavaFile(filePath, base string, processed map[string]bool, w io.Writ
 	if err := f.Close(); err != nil {
 		log.Printf("Error closing file %s: %v", filePath, err)
 	}
-	fmt.Fprintf(w, "// --------- FILE END: \"%s\" ----------\n", relPath)
+	fmt.Fprintf(w, fileEndFormat, relPath)
+
 	f2, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -475,7 +486,8 @@ func processKotlinFile(filePath, base string, processed map[string]bool, w io.Wr
 		return err
 	}
 	modTime := info.ModTime().Format(time.RFC3339)
-	fmt.Fprintf(w, "// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
+	fmt.Fprintf(w, fileStartFormat, relPath, info.Size(), modTime)
+
 	f, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -487,7 +499,8 @@ func processKotlinFile(filePath, base string, processed map[string]bool, w io.Wr
 	if err := f.Close(); err != nil {
 		log.Printf("Error closing file %s: %v", filePath, err)
 	}
-	fmt.Fprintf(w, "// --------- FILE END: \"%s\" ----------\n", relPath)
+	fmt.Fprintf(w, fileEndFormat, relPath)
+
 	f2, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -555,7 +568,8 @@ func processNonGoFile(filePath string, w io.Writer) error {
 		return err
 	}
 	modTime := info.ModTime().Format(time.RFC3339)
-	fmt.Fprintf(w, "// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
+	fmt.Fprintf(w, fileStartFormat, relPath, info.Size(), modTime)
+
 	f, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -567,7 +581,7 @@ func processNonGoFile(filePath string, w io.Writer) error {
 	if err := f.Close(); err != nil {
 		log.Printf("Error closing file %s: %v", filePath, err)
 	}
-	fmt.Fprintf(w, "// --------- FILE END: \"%s\" ----------\n", relPath)
+	fmt.Fprintf(w, fileEndFormat, relPath)
 	return nil
 }
 
@@ -592,11 +606,9 @@ func splitInput(r io.Reader, outDir string) error {
 	var currentFile *os.File
 	var currentFilename string
 	inFile := false
-	headerPrefix := "// --------- FILE START: "
-	footerPrefix := "// --------- FILE END: "
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.HasPrefix(line, headerPrefix) {
+		if strings.HasPrefix(line, fileStartPrefix) {
 			startQuote := strings.Index(line, "\"")
 			if startQuote == -1 {
 				log.Printf("Invalid header format: %s", line)
@@ -632,7 +644,7 @@ func splitInput(r io.Reader, outDir string) error {
 			inFile = true
 			continue
 		}
-		if strings.HasPrefix(line, footerPrefix) && inFile {
+		if strings.HasPrefix(line, fileEndPrefix) && inFile {
 			if currentFile != nil {
 				if err := currentFile.Close(); err != nil {
 					log.Printf("Error closing file %q: %v", currentFilename, err)
