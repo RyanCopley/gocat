@@ -1,15 +1,3 @@
-// gocat.go
-//
-// This version of gocat is designed to run on Windows, macOS, and Linux.
-// It bundles source files (Go, Java, Kotlin, and other files) into a single output stream
-// with embedded metadata delimiters, and can later split that stream back into individual files.
-// It supports recursive dependency resolution by scanning import statements,
-// allows exclusion of files/packages, and checks for updates against the public GitHub repo.
-//
-// The current version is embedded in the variable "version" and is intended to be set at build time via ldflags.
-// For example:
-//   go build -ldflags="-s -w -X main.version=$(git describe --tags)" ...
-
 package main
 
 import (
