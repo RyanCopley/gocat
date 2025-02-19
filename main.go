@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"flag"
 	"fmt"
 	"go/parser"
@@ -54,17 +55,15 @@ func main() {
 			}
 		}
 
-		// Output the magic header first.
-		fmt.Println(magicHeader)
-
-		// Read the module name from go.mod.
+		// Read the module name from go.mod BEFORE producing any output.
 		moduleName, err := getModuleName()
 		if err != nil {
 			log.Fatalf("Error reading go.mod: %v", err)
 		}
 
+		// Buffer the output so we only print the magic header if some files are processed.
+		var buf bytes.Buffer
 		processed := make(map[string]bool)
-		// Process each provided glob pattern.
 		for _, pattern := range joinCmd.Args() {
 			pattern = filepath.Clean(pattern)
 			matches, err := filepath.Glob(pattern)
@@ -78,10 +77,15 @@ func main() {
 			}
 			for _, file := range matches {
 				file = filepath.Clean(file)
-				if err := processFile(file, moduleName, processed); err != nil {
+				if err := processFile(file, moduleName, processed, &buf); err != nil {
 					log.Printf("Error processing %s: %v", file, err)
 				}
 			}
+		}
+		// Only output if the buffer is non-empty.
+		if buf.Len() > 0 {
+			fmt.Println(magicHeader)
+			fmt.Print(buf.String())
 		}
 	case "split":
 		splitCmd := flag.NewFlagSet("split", flag.ExitOnError)
@@ -163,12 +167,19 @@ func isExcludedFile(relPath string) bool {
 	return false
 }
 
-// processFile is the unified function for processing any file.
-// If the file is a Go file, it processes it (and its imports) recursively.
-// Otherwise, it simply outputs the file.
-func processFile(filePath, moduleName string, processed map[string]bool) error {
-	// Normalize the file path.
+// processFile processes any file. For Go files, it handles them recursively.
+// The output is written to w.
+func processFile(filePath, moduleName string, processed map[string]bool, w io.Writer) error {
 	filePath = filepath.Clean(filePath)
+	// Check if the file exists.
+	if _, err := os.Stat(filePath); err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("File not found: %s", filePath)
+			return nil
+		}
+		return err
+	}
+
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
 		return err
@@ -183,7 +194,6 @@ func processFile(filePath, moduleName string, processed map[string]bool) error {
 		return nil
 	}
 
-	// Avoid processing the same file more than once.
 	if processed[absPath] {
 		return nil
 	}
@@ -198,20 +208,19 @@ func processFile(filePath, moduleName string, processed map[string]bool) error {
 			} else {
 				for _, ex := range excludePackages {
 					if pkg == ex {
-						// Skip this file.
 						return nil
 					}
 				}
 			}
 		}
-		return processGoFile(filePath, moduleName, processed)
+		return processGoFile(filePath, moduleName, processed, w)
 	}
-	return processNonGoFile(filePath)
+	return processNonGoFile(filePath, w)
 }
 
 // processGoFile processes a Go source file by printing its header, content, and footer,
 // then parsing its import statements to recursively include any internal files.
-func processGoFile(filePath, moduleName string, processed map[string]bool) error {
+func processGoFile(filePath, moduleName string, processed map[string]bool, w io.Writer) error {
 	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
@@ -230,17 +239,15 @@ func processGoFile(filePath, moduleName string, processed map[string]bool) error
 	modTime := info.ModTime().Format(time.RFC3339)
 
 	// Print header.
-	fmt.Printf("// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
+	fmt.Fprintf(w, "// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
 
 	// Open the file and output its contents.
 	f, err := os.Open(filePath)
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(os.Stdout, f); err != nil {
-		if cerr := f.Close(); cerr != nil {
-			log.Printf("Error closing file %s: %v", filePath, cerr)
-		}
+	if _, err := io.Copy(w, f); err != nil {
+		_ = f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {
@@ -248,7 +255,7 @@ func processGoFile(filePath, moduleName string, processed map[string]bool) error
 	}
 
 	// Print footer.
-	fmt.Printf("// --------- FILE END: \"%s\" ----------\n", relPath)
+	fmt.Fprintf(w, "// --------- FILE END: \"%s\" ----------\n", relPath)
 
 	// Re-open the file for parsing imports.
 	f2, err := os.Open(filePath)
@@ -299,7 +306,7 @@ func processGoFile(filePath, moduleName string, processed map[string]bool) error
 			}
 			fileInPkg := filepath.Join(packageDir, entry.Name())
 			fileInPkg = filepath.Clean(fileInPkg)
-			if err := processFile(fileInPkg, moduleName, processed); err != nil {
+			if err := processFile(fileInPkg, moduleName, processed, w); err != nil {
 				log.Printf("Error processing %s: %v", fileInPkg, err)
 			}
 		}
@@ -308,7 +315,7 @@ func processGoFile(filePath, moduleName string, processed map[string]bool) error
 }
 
 // processNonGoFile prints a non-Go file with the appropriate header, content, and footer.
-func processNonGoFile(filePath string) error {
+func processNonGoFile(filePath string, w io.Writer) error {
 	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
@@ -326,17 +333,15 @@ func processNonGoFile(filePath string) error {
 	modTime := info.ModTime().Format(time.RFC3339)
 
 	// Print header.
-	fmt.Printf("// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
+	fmt.Fprintf(w, "// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
 
 	// Open and copy file content.
 	f, err := os.Open(filePath)
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(os.Stdout, f); err != nil {
-		if cerr := f.Close(); cerr != nil {
-			log.Printf("Error closing file %s: %v", filePath, cerr)
-		}
+	if _, err := io.Copy(w, f); err != nil {
+		_ = f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {
@@ -344,7 +349,7 @@ func processNonGoFile(filePath string) error {
 	}
 
 	// Print footer.
-	fmt.Printf("// --------- FILE END: \"%s\" ----------\n", relPath)
+	fmt.Fprintf(w, "// --------- FILE END: \"%s\" ----------\n", relPath)
 	return nil
 }
 
