@@ -1,3 +1,4 @@
+// gocat.go
 package main
 
 import (
@@ -144,28 +145,35 @@ func processFile(filePath, moduleName string, processed map[string]bool) error {
 	return processNonGoFile(filePath)
 }
 
-// processGoFile processes a Go source file by outputting its contents
-// and then parsing its import statements to recursively include any internal files.
+// processGoFile processes a Go source file by printing its header, content, and footer,
+// then parsing its import statements to recursively include any internal files.
 func processGoFile(filePath, moduleName string, processed map[string]bool) error {
-	// Normalize file path.
 	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
 		return err
 	}
-	// Compute a path relative to the module root (assumed to be current directory).
 	relPath, err := filepath.Rel(".", absPath)
 	if err != nil {
 		relPath = filePath
 	}
 
-	// Open the file and output its contents with delimiters.
+	// Get file info for metadata.
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return err
+	}
+	modTime := info.ModTime().Format(time.RFC3339)
+
+	// Print header.
+	fmt.Printf("// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
+
+	// Open the file and output its contents.
 	f, err := os.Open(filePath)
 	if err != nil {
 		return err
 	}
 	if _, err := io.Copy(os.Stdout, f); err != nil {
-		// Ensure the file is closed.
 		if cerr := f.Close(); cerr != nil {
 			log.Printf("Error closing file %s: %v", filePath, cerr)
 		}
@@ -174,15 +182,8 @@ func processGoFile(filePath, moduleName string, processed map[string]bool) error
 	if err := f.Close(); err != nil {
 		log.Printf("Error closing file %s: %v", filePath, err)
 	}
-	// Get file info for metadata.
-	info, err := os.Stat(filePath)
-	if err != nil {
-		return err
-	}
-	modTime := info.ModTime().Format(time.RFC3339)
-	// Output header and footer with file content already sent to Stdout.
-	fmt.Printf("// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
-	// (Since file content was already output above, we only output delimiters here.)
+
+	// Print footer.
 	fmt.Printf("// --------- FILE END: \"%s\" ----------\n", relPath)
 
 	// Re-open the file for parsing imports.
@@ -212,7 +213,6 @@ func processGoFile(filePath, moduleName string, processed map[string]bool) error
 			continue
 		}
 
-		// Determine the package directory.
 		var relDir string
 		if importPath == moduleName {
 			relDir = "."
@@ -224,7 +224,6 @@ func processGoFile(filePath, moduleName string, processed map[string]bool) error
 		packageDir := filepath.Join(".", relDir)
 		packageDir = filepath.Clean(packageDir)
 
-		// List all files in the package directory and process each one.
 		entries, err := os.ReadDir(packageDir)
 		if err != nil {
 			log.Printf("Error reading directory %q: %v", packageDir, err)
@@ -232,7 +231,6 @@ func processGoFile(filePath, moduleName string, processed map[string]bool) error
 		}
 		for _, entry := range entries {
 			if entry.IsDir() {
-				// Skip subdirectories.
 				continue
 			}
 			fileInPkg := filepath.Join(packageDir, entry.Name())
@@ -245,7 +243,7 @@ func processGoFile(filePath, moduleName string, processed map[string]bool) error
 	return nil
 }
 
-// processNonGoFile simply outputs a non-Go file with the appropriate delimiters.
+// processNonGoFile prints a non-Go file with the appropriate header, content, and footer.
 func processNonGoFile(filePath string) error {
 	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
@@ -257,6 +255,16 @@ func processNonGoFile(filePath string) error {
 		relPath = filePath
 	}
 
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return err
+	}
+	modTime := info.ModTime().Format(time.RFC3339)
+
+	// Print header.
+	fmt.Printf("// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
+
+	// Open and copy file content.
 	f, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -270,12 +278,8 @@ func processNonGoFile(filePath string) error {
 	if err := f.Close(); err != nil {
 		log.Printf("Error closing file %s: %v", filePath, err)
 	}
-	info, err := os.Stat(filePath)
-	if err != nil {
-		return err
-	}
-	modTime := info.ModTime().Format(time.RFC3339)
-	fmt.Printf("// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
+
+	// Print footer.
 	fmt.Printf("// --------- FILE END: \"%s\" ----------\n", relPath)
 	return nil
 }
@@ -293,7 +297,6 @@ func splitInput(r io.Reader, outDir string) error {
 		return fmt.Errorf("invalid magic header: %s", firstLine)
 	}
 
-	// If outDir is specified, normalize its absolute path.
 	var absOutDir string
 	var err error
 	if outDir != "" {
@@ -312,10 +315,7 @@ func splitInput(r io.Reader, outDir string) error {
 	for scanner.Scan() {
 		line := scanner.Text()
 
-		// Detect header delimiter.
 		if strings.HasPrefix(line, headerPrefix) {
-			// Expected header format:
-			// // --------- FILE START: "filename" (size: ... bytes, modtime: ...) ----------
 			startQuote := strings.Index(line, "\"")
 			if startQuote == -1 {
 				log.Printf("Invalid header format: %s", line)
@@ -327,9 +327,7 @@ func splitInput(r io.Reader, outDir string) error {
 				continue
 			}
 			filename := line[startQuote+1 : startQuote+1+endQuote]
-			// Clean the extracted filename.
 			filename = filepath.Clean(filename)
-			// If outDir is provided, join and then ensure the result is within absOutDir.
 			if absOutDir != "" {
 				filename = filepath.Join(absOutDir, filename)
 				filename = filepath.Clean(filename)
@@ -339,7 +337,6 @@ func splitInput(r io.Reader, outDir string) error {
 					continue
 				}
 			}
-			// Create directory structure as needed with secure permissions (0750).
 			if err := os.MkdirAll(filepath.Dir(filename), 0750); err != nil {
 				log.Printf("Error creating directories for %q: %v", filename, err)
 				continue
@@ -355,7 +352,6 @@ func splitInput(r io.Reader, outDir string) error {
 			continue
 		}
 
-		// Detect footer delimiter.
 		if strings.HasPrefix(line, footerPrefix) && inFile {
 			if currentFile != nil {
 				if err := currentFile.Close(); err != nil {
@@ -368,7 +364,6 @@ func splitInput(r io.Reader, outDir string) error {
 			continue
 		}
 
-		// Write file content lines.
 		if inFile && currentFile != nil {
 			if _, err := currentFile.WriteString(line + "\n"); err != nil {
 				log.Printf("Error writing to file %q: %v", currentFilename, err)
