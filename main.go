@@ -1,4 +1,3 @@
-// gocat.go
 package main
 
 import (
@@ -28,7 +27,9 @@ func main() {
 	switch command {
 	case "join":
 		joinCmd := flag.NewFlagSet("join", flag.ExitOnError)
-		joinCmd.Parse(os.Args[2:])
+		if err := joinCmd.Parse(os.Args[2:]); err != nil {
+			log.Fatalf("Error parsing join command: %v", err)
+		}
 		if joinCmd.NArg() == 0 {
 			log.Fatal("Usage: join [file or glob pattern] ...")
 		}
@@ -45,6 +46,7 @@ func main() {
 		processed := make(map[string]bool)
 		// Process each provided glob pattern.
 		for _, pattern := range joinCmd.Args() {
+			pattern = filepath.Clean(pattern)
 			matches, err := filepath.Glob(pattern)
 			if err != nil {
 				log.Printf("Invalid glob pattern %q: %v", pattern, err)
@@ -55,6 +57,7 @@ func main() {
 				continue
 			}
 			for _, file := range matches {
+				file = filepath.Clean(file)
 				if err := processFile(file, moduleName, processed); err != nil {
 					log.Printf("Error processing %s: %v", file, err)
 				}
@@ -64,15 +67,22 @@ func main() {
 		splitCmd := flag.NewFlagSet("split", flag.ExitOnError)
 		inputFile := splitCmd.String("in", "", "Input file to split (default: STDIN)")
 		outputDir := splitCmd.String("out", "", "Output directory (default: current directory)")
-		splitCmd.Parse(os.Args[2:])
+		if err := splitCmd.Parse(os.Args[2:]); err != nil {
+			log.Fatalf("Error parsing split command: %v", err)
+		}
 
 		var in io.Reader
 		if *inputFile != "" {
+			*inputFile = filepath.Clean(*inputFile)
 			f, err := os.Open(*inputFile)
 			if err != nil {
 				log.Fatalf("Error opening input file %q: %v", *inputFile, err)
 			}
-			defer f.Close()
+			defer func() {
+				if err := f.Close(); err != nil {
+					log.Printf("Error closing input file: %v", err)
+				}
+			}()
 			in = f
 		} else {
 			in = os.Stdin
@@ -116,6 +126,8 @@ func getModuleName() (string, error) {
 // If the file is a Go file, it processes it (and its imports) recursively.
 // Otherwise, it simply outputs the file.
 func processFile(filePath, moduleName string, processed map[string]bool) error {
+	// Normalize the file path.
+	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
 		return err
@@ -135,6 +147,8 @@ func processFile(filePath, moduleName string, processed map[string]bool) error {
 // processGoFile processes a Go source file by outputting its contents
 // and then parsing its import statements to recursively include any internal files.
 func processGoFile(filePath, moduleName string, processed map[string]bool) error {
+	// Normalize file path.
+	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
 		return err
@@ -150,20 +164,25 @@ func processGoFile(filePath, moduleName string, processed map[string]bool) error
 	if err != nil {
 		return err
 	}
-	info, err := f.Stat()
+	if _, err := io.Copy(os.Stdout, f); err != nil {
+		// Ensure the file is closed.
+		if cerr := f.Close(); cerr != nil {
+			log.Printf("Error closing file %s: %v", filePath, cerr)
+		}
+		return err
+	}
+	if err := f.Close(); err != nil {
+		log.Printf("Error closing file %s: %v", filePath, err)
+	}
+	// Get file info for metadata.
+	info, err := os.Stat(filePath)
 	if err != nil {
-		f.Close()
 		return err
 	}
 	modTime := info.ModTime().Format(time.RFC3339)
-	fmt.Printf("// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n",
-		relPath, info.Size(), modTime)
-	if _, err := io.Copy(os.Stdout, f); err != nil {
-		f.Close()
-		return err
-	}
-	f.Close()
-	fmt.Print("\n")
+	// Output header and footer with file content already sent to Stdout.
+	fmt.Printf("// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
+	// (Since file content was already output above, we only output delimiters here.)
 	fmt.Printf("// --------- FILE END: \"%s\" ----------\n", relPath)
 
 	// Re-open the file for parsing imports.
@@ -171,7 +190,11 @@ func processGoFile(filePath, moduleName string, processed map[string]bool) error
 	if err != nil {
 		return err
 	}
-	defer f2.Close()
+	defer func() {
+		if cerr := f2.Close(); cerr != nil {
+			log.Printf("Error closing file %s: %v", filePath, cerr)
+		}
+	}()
 
 	fset := token.NewFileSet()
 	parsed, err := parser.ParseFile(fset, filePath, f2, parser.ImportsOnly)
@@ -199,8 +222,9 @@ func processGoFile(filePath, moduleName string, processed map[string]bool) error
 			continue
 		}
 		packageDir := filepath.Join(".", relDir)
+		packageDir = filepath.Clean(packageDir)
 
-		// List **all** files in the package directory and process each one.
+		// List all files in the package directory and process each one.
 		entries, err := os.ReadDir(packageDir)
 		if err != nil {
 			log.Printf("Error reading directory %q: %v", packageDir, err)
@@ -212,6 +236,7 @@ func processGoFile(filePath, moduleName string, processed map[string]bool) error
 				continue
 			}
 			fileInPkg := filepath.Join(packageDir, entry.Name())
+			fileInPkg = filepath.Clean(fileInPkg)
 			if err := processFile(fileInPkg, moduleName, processed); err != nil {
 				log.Printf("Error processing %s: %v", fileInPkg, err)
 			}
@@ -222,6 +247,7 @@ func processGoFile(filePath, moduleName string, processed map[string]bool) error
 
 // processNonGoFile simply outputs a non-Go file with the appropriate delimiters.
 func processNonGoFile(filePath string) error {
+	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
 		return err
@@ -235,20 +261,21 @@ func processNonGoFile(filePath string) error {
 	if err != nil {
 		return err
 	}
-	info, err := f.Stat()
+	if _, err := io.Copy(os.Stdout, f); err != nil {
+		if cerr := f.Close(); cerr != nil {
+			log.Printf("Error closing file %s: %v", filePath, cerr)
+		}
+		return err
+	}
+	if err := f.Close(); err != nil {
+		log.Printf("Error closing file %s: %v", filePath, err)
+	}
+	info, err := os.Stat(filePath)
 	if err != nil {
-		f.Close()
 		return err
 	}
 	modTime := info.ModTime().Format(time.RFC3339)
-	fmt.Printf("// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n",
-		relPath, info.Size(), modTime)
-	if _, err := io.Copy(os.Stdout, f); err != nil {
-		f.Close()
-		return err
-	}
-	f.Close()
-	fmt.Print("\n")
+	fmt.Printf("// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
 	fmt.Printf("// --------- FILE END: \"%s\" ----------\n", relPath)
 	return nil
 }
@@ -264,6 +291,16 @@ func splitInput(r io.Reader, outDir string) error {
 	firstLine := scanner.Text()
 	if !strings.HasPrefix(firstLine, magicHeader) {
 		return fmt.Errorf("invalid magic header: %s", firstLine)
+	}
+
+	// If outDir is specified, normalize its absolute path.
+	var absOutDir string
+	var err error
+	if outDir != "" {
+		absOutDir, err = filepath.Abs(filepath.Clean(outDir))
+		if err != nil {
+			return fmt.Errorf("failed to get absolute path for output directory: %v", err)
+		}
 	}
 
 	var currentFile *os.File
@@ -290,11 +327,20 @@ func splitInput(r io.Reader, outDir string) error {
 				continue
 			}
 			filename := line[startQuote+1 : startQuote+1+endQuote]
-			if outDir != "" {
-				filename = filepath.Join(outDir, filename)
+			// Clean the extracted filename.
+			filename = filepath.Clean(filename)
+			// If outDir is provided, join and then ensure the result is within absOutDir.
+			if absOutDir != "" {
+				filename = filepath.Join(absOutDir, filename)
+				filename = filepath.Clean(filename)
+				relToOut, err := filepath.Rel(absOutDir, filename)
+				if err != nil || strings.HasPrefix(relToOut, "..") {
+					log.Printf("Invalid output file path %q; skipping", filename)
+					continue
+				}
 			}
-			// Create directory structure as needed.
-			if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
+			// Create directory structure as needed with secure permissions (0750).
+			if err := os.MkdirAll(filepath.Dir(filename), 0750); err != nil {
 				log.Printf("Error creating directories for %q: %v", filename, err)
 				continue
 			}
@@ -311,7 +357,11 @@ func splitInput(r io.Reader, outDir string) error {
 
 		// Detect footer delimiter.
 		if strings.HasPrefix(line, footerPrefix) && inFile {
-			currentFile.Close()
+			if currentFile != nil {
+				if err := currentFile.Close(); err != nil {
+					log.Printf("Error closing file %q: %v", currentFilename, err)
+				}
+			}
 			currentFile = nil
 			currentFilename = ""
 			inFile = false
