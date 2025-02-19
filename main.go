@@ -16,6 +16,8 @@ import (
 	"time"
 )
 
+const magicHeader = "// --------- gocat v1"
+
 func main() {
 	if len(os.Args) < 2 {
 		printGeneralHelp()
@@ -30,6 +32,9 @@ func main() {
 		if joinCmd.NArg() == 0 {
 			log.Fatal("Usage: join [file or glob pattern] ...")
 		}
+
+		// Output the magic header first.
+		fmt.Println(magicHeader)
 
 		// Read the module name from go.mod.
 		moduleName, err := getModuleName()
@@ -124,7 +129,7 @@ func processFile(filePath, moduleName string, processed map[string]bool) error {
 	if filepath.Ext(filePath) == ".go" {
 		return processGoFile(filePath, moduleName, processed)
 	}
-	return processNonGoFile(filePath, processed)
+	return processNonGoFile(filePath)
 }
 
 // processGoFile processes a Go source file by outputting its contents
@@ -216,7 +221,7 @@ func processGoFile(filePath, moduleName string, processed map[string]bool) error
 }
 
 // processNonGoFile simply outputs a non-Go file with the appropriate delimiters.
-func processNonGoFile(filePath string, processed map[string]bool) error {
+func processNonGoFile(filePath string) error {
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
 		return err
@@ -251,6 +256,16 @@ func processNonGoFile(filePath string, processed map[string]bool) error {
 // splitInput reads a joined stream from r and recreates each file based on the delimiters.
 func splitInput(r io.Reader, outDir string) error {
 	scanner := bufio.NewScanner(r)
+
+	// Validate magic header.
+	if !scanner.Scan() {
+		return fmt.Errorf("input is empty, missing magic header")
+	}
+	firstLine := scanner.Text()
+	if !strings.HasPrefix(firstLine, magicHeader) {
+		return fmt.Errorf("invalid magic header: %s", firstLine)
+	}
+
 	var currentFile *os.File
 	var currentFilename string
 	inFile := false
