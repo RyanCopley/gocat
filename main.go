@@ -195,7 +195,8 @@ func checkForUpdates(moduleName string) {
 	}
 	repoOwner := parts[1]
 	repoName := parts[2]
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName)
+	
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName) // #nosec G107
 	resp, err := http.Get(url)
 	if err != nil {
 		log.Printf("Update check failed: %v", err)
