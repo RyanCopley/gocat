@@ -1,3 +1,18 @@
+// gocat.go
+//
+// This version of gocat is designed to run on Windows, macOS, and Linux.
+// It bundles source files (Go, Java, Kotlin, and other files) into a single output stream
+// with embedded metadata delimiters, and can later split that stream back into individual files.
+// It supports recursive dependency resolution by scanning import statements,
+// allows exclusion of files/packages, and checks for updates against the public GitHub repo.
+//
+// The current version is embedded in the variable "version" and is intended to be set at build time via ldflags.
+// For example:
+//   go build -ldflags="-s -w -X main.version=$(git describe --tags)" ...
+//
+// The updater retrieves the module information from the build info using debug.ReadBuildInfo(),
+// which is more reliable than reading the go.mod file at runtime.
+
 package main
 
 import (
@@ -14,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -66,7 +82,7 @@ func main() {
 		excludePkgs := joinCmd.String("exclude-packages", "", "Comma-separated package names to exclude (for Go files)")
 		excludeFilesFlag := joinCmd.String("exclude-files", "", "Comma-separated file patterns to exclude")
 		javaBaseFlag := joinCmd.String("java-base", "", "Base package for Java/Kotlin recursive dependency resolution")
-		goBaseFlag := joinCmd.String("go-base", "", "Base module for Go recursive dependency resolution (overrides go.mod)")
+		goBaseFlag := joinCmd.String("go-base", "", "Base module for Go recursive dependency resolution (overrides build info)")
 		if err := joinCmd.Parse(os.Args[2:]); err != nil {
 			log.Fatalf("Error parsing join command: %v", err)
 		}
@@ -101,7 +117,7 @@ func main() {
 			var err error
 			moduleName, err = getModuleName()
 			if err != nil {
-				log.Fatalf("Error reading go.mod: %v", err)
+				log.Fatalf("Error retrieving module info: %v", err)
 			}
 		}
 
@@ -168,75 +184,17 @@ func main() {
 	}
 }
 
-// checkForUpdates queries GitHub for the latest release and prints a banner with release notes
-// if the current version is outdated. It derives the repository info from the module name.
-func checkForUpdates(moduleName string) {
-	// Expect moduleName in the form "github.com/username/reponame"
-	if !strings.HasPrefix(moduleName, "github.com/") {
-		log.Printf("Update check skipped: module %q is not hosted on GitHub", moduleName)
-		return
-	}
-	parts := strings.Split(moduleName, "/")
-	if len(parts) < 3 {
-		log.Printf("Update check skipped: module %q is not in expected format", moduleName)
-		return
-	}
-	repoOwner := parts[1]
-	repoName := parts[2]
-	
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName)
-	resp, err := http.Get(url)
-	if err != nil {
-		log.Printf("Update check failed: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("Update check returned status %d", resp.StatusCode)
-		return
-	}
-	var rel struct {
-		TagName string `json:"tag_name"`
-		Body    string `json:"body"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		log.Printf("Failed to decode update info: %v", err)
-		return
-	}
-	// Use semver to compare versions.
-	currentVer, err := semver.NewVersion(strings.TrimPrefix(version, "v"))
-	if err != nil {
-		log.Printf("Invalid current version format: %v", err)
-		return
-	}
-	latestVer, err := semver.NewVersion(strings.TrimPrefix(rel.TagName, "v"))
-	if err != nil {
-		log.Printf("Invalid latest version format: %v", err)
-		return
-	}
-	if currentVer.LessThan(latestVer) {
-		fmt.Fprintf(os.Stderr, "Update available: version %s is available (you are using %s).\n", rel.TagName, version)
-		fmt.Fprintf(os.Stderr, "Release notes:\n%s\n", rel.Body)
-	}
-}
-
-// getModuleName reads the Go module name from go.mod in the current directory.
+// getModuleName retrieves the module path using runtime debug information.
+// This allows the updater to work even in compiled binaries.
 func getModuleName() (string, error) {
-	data, err := os.ReadFile("go.mod")
-	if err != nil {
-		return "", err
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "", fmt.Errorf("failed to read build info")
 	}
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "module ") {
-			parts := strings.Fields(line)
-			if len(parts) >= 2 {
-				return parts[1], nil
-			}
-		}
+	if bi.Main.Path == "" {
+		return "", fmt.Errorf("module path not found in build info")
 	}
-	return "", fmt.Errorf("module name not found in go.mod")
+	return bi.Main.Path, nil
 }
 
 // getJavaModuleName attempts to extract the base package (group) from common Java build files.
@@ -278,6 +236,57 @@ func getJavaModuleName() (string, error) {
 		return "", fmt.Errorf("group not found in build.gradle.kts")
 	}
 	return "", fmt.Errorf("no recognized Java build file found")
+}
+
+// checkForUpdates queries GitHub for the latest release and prints a banner with release notes
+// if the current version is outdated. It derives the repository info from the module name.
+func checkForUpdates(moduleName string) {
+	// Expect moduleName in the form "github.com/username/reponame"
+	if !strings.HasPrefix(moduleName, "github.com/") {
+		log.Printf("Update check skipped: module %q is not hosted on GitHub", moduleName)
+		return
+	}
+	parts := strings.Split(moduleName, "/")
+	if len(parts) < 3 {
+		log.Printf("Update check skipped: module %q is not in expected format", moduleName)
+		return
+	}
+	repoOwner := parts[1]
+	repoName := parts[2]
+
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName) // #nosec G107
+	resp, err := http.Get(url)
+	if err != nil {
+		log.Printf("Update check failed: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Update check returned status %d", resp.StatusCode)
+		return
+	}
+	var rel struct {
+		TagName string `json:"tag_name"`
+		Body    string `json:"body"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		log.Printf("Failed to decode update info: %v", err)
+		return
+	}
+	currentVer, err := semver.NewVersion(strings.TrimPrefix(version, "v"))
+	if err != nil {
+		log.Printf("Invalid current version format: %v", err)
+		return
+	}
+	latestVer, err := semver.NewVersion(strings.TrimPrefix(rel.TagName, "v"))
+	if err != nil {
+		log.Printf("Invalid latest version format: %v", err)
+		return
+	}
+	if currentVer.LessThan(latestVer) {
+		fmt.Fprintf(os.Stderr, "Update available: version %s is available (you are using %s).\n", rel.TagName, version)
+		fmt.Fprintf(os.Stderr, "Release notes:\n%s\n", rel.Body)
+	}
 }
 
 // isExcludedFile checks if the file (by its relative path) matches any exclusion pattern.
