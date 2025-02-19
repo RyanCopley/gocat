@@ -42,6 +42,8 @@ func main() {
 		excludeFilesFlag := joinCmd.String("exclude-files", "", "Comma-separated file patterns to exclude")
 		// Flag for Java/Kotlin: base package for recursive dependency resolution.
 		javaBaseFlag := joinCmd.String("java-base", "", "Base package for Java/Kotlin recursive dependency resolution")
+		// New flag for Go: base module for recursive dependency resolution.
+		goBaseFlag := joinCmd.String("go-base", "", "Base module for Go recursive dependency resolution (overrides go.mod)")
 		if err := joinCmd.Parse(os.Args[2:]); err != nil {
 			log.Fatalf("Error parsing join command: %v", err)
 		}
@@ -71,10 +73,16 @@ func main() {
 			}
 		}
 
-		// Read the Go module name from go.mod BEFORE producing any output.
-		moduleName, err := getModuleName()
-		if err != nil {
-			log.Fatalf("Error reading go.mod: %v", err)
+		// Determine the Go module name.
+		var moduleName string
+		if *goBaseFlag != "" {
+			moduleName = strings.TrimSpace(*goBaseFlag)
+		} else {
+			var err error
+			moduleName, err = getModuleName()
+			if err != nil {
+				log.Fatalf("Error reading go.mod: %v", err)
+			}
 		}
 
 		// Buffer the output so we only print the magic header if some files are processed.
@@ -299,17 +307,12 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 		relPath = filePath
 	}
 
-	// Get file info for metadata.
 	info, err := os.Stat(filePath)
 	if err != nil {
 		return err
 	}
 	modTime := info.ModTime().Format(time.RFC3339)
-
-	// Print header.
 	fmt.Fprintf(w, "// --------- FILE START: \"%s\" (size: %d bytes, modtime: %s) ----------\n", relPath, info.Size(), modTime)
-
-	// Output file content.
 	f, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -321,11 +324,7 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 	if err := f.Close(); err != nil {
 		log.Printf("Error closing file %s: %v", filePath, err)
 	}
-
-	// Print footer.
 	fmt.Fprintf(w, "// --------- FILE END: \"%s\" ----------\n", relPath)
-
-	// Parse imports.
 	f2, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -335,14 +334,11 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 			log.Printf("Error closing file %s: %v", filePath, cerr)
 		}
 	}()
-
 	fset := token.NewFileSet()
 	parsed, err := parser.ParseFile(fset, filePath, f2, parser.ImportsOnly)
 	if err != nil {
 		return err
 	}
-
-	// Process each import starting with the module name.
 	for _, imp := range parsed.Imports {
 		importPath, err := strconv.Unquote(imp.Path.Value)
 		if err != nil {
@@ -351,7 +347,6 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 		if !strings.HasPrefix(importPath, moduleName) {
 			continue
 		}
-
 		var relDir string
 		if importPath == moduleName {
 			relDir = "."
@@ -362,7 +357,6 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 		}
 		packageDir := filepath.Join(".", relDir)
 		packageDir = filepath.Clean(packageDir)
-
 		entries, err := os.ReadDir(packageDir)
 		if err != nil {
 			log.Printf("Error reading directory %q: %v", packageDir, err)
@@ -386,7 +380,6 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 // then scanning its content for import statements to recursively include internal files
 // if they belong to the specified base package.
 func processJavaFile(filePath, base string, processed map[string]bool, w io.Writer) error {
-	// (The implementation for Java files remains as before.)
 	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
@@ -466,7 +459,7 @@ func processJavaFile(filePath, base string, processed map[string]bool, w io.Writ
 
 // processKotlinFile processes a Kotlin source file (.kt or .kts) by printing its header, content, and footer,
 // then scanning its content for import statements to recursively include internal files
-// if they belong to the specified base package. The regex here accepts an optional semicolon.
+// if they belong to the specified base package.
 func processKotlinFile(filePath, base string, processed map[string]bool, w io.Writer) error {
 	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
@@ -501,7 +494,6 @@ func processKotlinFile(filePath, base string, processed map[string]bool, w io.Wr
 	}
 	defer f2.Close()
 	scanner := bufio.NewScanner(f2)
-	// Kotlin import lines do not require a semicolon.
 	importRegex := regexp.MustCompile(`^\s*import\s+([a-zA-Z0-9_.]+);?`)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -687,14 +679,14 @@ func printSubcommandHelp(cmd string) {
 
 Joins the specified source file(s) into a single output stream,
 inserting delimiters between files. For Go files, the tool parses its imports
-and recursively includes any files from packages within the same module (as determined by go.mod).
+and recursively includes any files from packages within the same module (as determined by go.mod or -go-base).
 For Java/Kotlin files, if a base package is provided via -java-base (or auto-detected from a build file),
 recursive inclusion is performed by scanning for import statements.
 Non-source files are simply included as-is.
 Each file is included only once.
 
 Example:
-  %s join "main.go" "./pkg/*.go" -exclude-packages="expressions,lexer" -exclude-files="vendor/*,testdata/*" -java-base="com.example"
+  %s join "main.go" "./pkg/*.go" -exclude-packages="expressions,lexer" -exclude-files="vendor/*,testdata/*" -java-base="com.example" -go-base="github.com/example/project"
 `, "gocat", "gocat")
 	case "split":
 		fmt.Printf(`Usage: %s split [-in inputfile] [-out outputdirectory]
