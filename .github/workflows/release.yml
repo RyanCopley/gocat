@@ -1,0 +1,86 @@
+name: Build, Package, and Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.24'
+
+      - name: Build and Zip Binary
+        shell: bash
+        run: |
+          # Navigate to the Go implementation directory
+          # Create a directory for built binaries at the repo root
+          mkdir -p build_output
+
+          # Define the output binary name (append .exe for Windows)
+          output_name="lql"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            output_name="${output_name}.exe"
+          fi
+          echo "Building for ${{ matrix.goos }} ${{ matrix.goarch }} as $output_name"
+
+          # Cross-compile the binary
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -ldflags="-s -w" -o build_output/${output_name} .
+
+          # Copy userguide.md into the zip archive
+          cp README.md build_output/README.md
+
+          # Change directory to build_output and zip the binary + README
+          cd build_output
+          zip_file="${output_name}-${{ matrix.goos }}-${{ matrix.goarch }}-${{ github.ref_name }}.zip"
+          zip -j "$zip_file" "$output_name" "README.md"
+          echo "Created zip file $zip_file"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          # Each matrix job produces a uniquely named artifact
+          name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: build_output/*.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          # Download all artifacts whose names start with "binary-"
+          path: artifacts
+          pattern: binary-*
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          body: |
+            Automated release for tag ${{ github.ref_name }}.
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: artifacts/**/*.zip
