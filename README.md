@@ -31,6 +31,10 @@
 - **Built-In Help:**  
   Includes a `help` subcommand to display usage information.
 
+- **Exclusion Options:**  
+  - **Exclude Packages:** Use the `-exclude-packages` flag with a comma-separated list of package names to exclude Go files whose package declaration matches one of the specified names.
+  - **Exclude Files:** Use the `-exclude-files` flag with a comma-separated list of glob patterns to skip specific files from processing.
+
 ## Prerequisites
 
 - Go 1.16 or later
@@ -74,6 +78,17 @@ The `join` command reads one or more files or glob patterns and outputs the cont
   ```bash
   ./gocat join "main.go" "assets/*"
   ```
+
+- **Join with Exclusions:**
+
+  ```bash
+  ./gocat join "main.go" "./pkg/*.go" -exclude-packages="expressions,lexer" -exclude-files="vendor/*,testdata/*"
+  ```
+
+#### Additional Options
+
+- `-exclude-packages`: Exclude Go files whose package declaration matches any of the specified comma-separated package names.
+- `-exclude-files`: Exclude files matching any of the specified comma-separated glob patterns.
 
 #### Output Format
 
