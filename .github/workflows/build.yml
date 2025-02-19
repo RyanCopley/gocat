@@ -35,3 +35,9 @@ jobs:
           fi
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
           go build -ldflags="-s -w -X main.version=$(git describe --tags)" -o build_output/${output_name} .
+
+      - name: Run GolangCI-Lint
+        uses: golangci/golangci-lint-action@v3
+        with:
+          version: v1.64.5
+          args: --timeout=5m
