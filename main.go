@@ -47,9 +47,6 @@ var (
 
 	// Java base for Java/Kotlin files.
 	javaBase string
-
-	// Dart base is not used.
-	dartBase string
 )
 
 func main() {
@@ -75,7 +72,6 @@ func main() {
 		excludeFilesFlag := joinCmd.String("exclude-files", "", "Comma-separated file patterns to exclude")
 		javaBaseFlag := joinCmd.String("java-base", "", "Base package for Java/Kotlin recursive dependency resolution")
 		goBaseFlag := joinCmd.String("go-base", "", "Base module for Go recursive dependency resolution (overrides go.mod)")
-		dartBaseFlag := joinCmd.String("dart-base", "", "(Unused) Base package for Dart recursive dependency resolution")
 		if err := joinCmd.Parse(os.Args[2:]); err != nil {
 			log.Fatalf("Error parsing join command: %v", err)
 		}
@@ -94,7 +90,6 @@ func main() {
 			}
 		}
 		javaBase = strings.TrimSpace(*javaBaseFlag)
-		dartBase = strings.TrimSpace(*dartBaseFlag)
 
 		// Determine if any file in the join arguments is a Go file.
 		hasGoFiles := false
@@ -800,16 +795,14 @@ func splitInput(r io.Reader, outDir string) error {
 		}
 		if strings.HasPrefix(line, fileEndPrefix) && inFile {
 			if currentFile != nil {
-				if err := currentFile.Close(); err != nil {
-				}
+				currentFile.Close()
 			}
 			currentFile = nil
 			inFile = false
 			continue
 		}
 		if inFile && currentFile != nil {
-			if _, err := currentFile.WriteString(line + "\n"); err != nil {
-			}
+			currentFile.WriteString(line + "\n")
 		}
 	}
 	if err := scanner.Err(); err != nil {
