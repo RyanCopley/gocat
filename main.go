@@ -795,7 +795,7 @@ func splitInput(r io.Reader, outDir string) error {
 		}
 		if strings.HasPrefix(line, fileEndPrefix) && inFile {
 			if currentFile != nil {
-				currentFile.Close()
+				_ = currentFile.Close()
 			}
 			currentFile = nil
 			inFile = false
