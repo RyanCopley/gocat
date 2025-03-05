@@ -40,24 +40,19 @@ const (
 )
 
 var (
-	// version should be overridden at build time via ldflags (default "dev")
 	version string = "dev"
 
-	// Global exclusion filters.
 	excludePackages []string
 	excludeFiles    []string
 
-	// Base package for Java/Kotlin recursive dependency resolution.
-	// Can be specified via -java-base or auto-detected on demand.
+	// Java base for Java/Kotlin files.
 	javaBase string
 
-	// Base package for Dart recursive dependency resolution.
-	// Can be specified via -dart-base or auto-detected on demand.
+	// Dart base is not used.
 	dartBase string
 )
 
 func main() {
-	// Use build info to get the module name for update checking.
 	modNameForUpdate, moduleNameError := getModuleNameForUpdater()
 
 	if len(os.Args) < 2 {
@@ -69,8 +64,6 @@ func main() {
 	}
 
 	command := os.Args[1]
-
-	// For commands other than "join", check for updates.
 	if moduleNameError == nil && command != "join" {
 		checkForUpdates(modNameForUpdate)
 	}
@@ -82,14 +75,14 @@ func main() {
 		excludeFilesFlag := joinCmd.String("exclude-files", "", "Comma-separated file patterns to exclude")
 		javaBaseFlag := joinCmd.String("java-base", "", "Base package for Java/Kotlin recursive dependency resolution")
 		goBaseFlag := joinCmd.String("go-base", "", "Base module for Go recursive dependency resolution (overrides go.mod)")
-		dartBaseFlag := joinCmd.String("dart-base", "", "Base package for Dart recursive dependency resolution")
+		dartBaseFlag := joinCmd.String("dart-base", "", "(Unused) Base package for Dart recursive dependency resolution")
 		if err := joinCmd.Parse(os.Args[2:]); err != nil {
 			log.Fatalf("Error parsing join command: %v", err)
 		}
 		if joinCmd.NArg() == 0 {
 			log.Fatal("Usage: join [file or glob pattern] ...")
 		}
-		// Process exclusion flags.
+
 		if *excludePkgs != "" {
 			for _, pkg := range strings.Split(*excludePkgs, ",") {
 				excludePackages = append(excludePackages, strings.TrimSpace(pkg))
@@ -100,20 +93,45 @@ func main() {
 				excludeFiles = append(excludeFiles, strings.TrimSpace(file))
 			}
 		}
-		// Store provided base paths (if any) without auto-detection here.
 		javaBase = strings.TrimSpace(*javaBaseFlag)
 		dartBase = strings.TrimSpace(*dartBaseFlag)
 
-		// Determine Go module name from the local go.mod.
-		var moduleName string
-		if *goBaseFlag != "" {
-			moduleName = strings.TrimSpace(*goBaseFlag)
-		} else {
-			var err error
-			moduleName, err = getGoModuleName()
+		// Determine if any file in the join arguments is a Go file.
+		hasGoFiles := false
+		for _, pattern := range joinCmd.Args() {
+			pattern = filepath.Clean(pattern)
+			matches, err := filepath.Glob(pattern)
 			if err != nil {
-				log.Fatalf("Error reading go.mod: %v", err)
+				continue
 			}
+			for _, file := range matches {
+				if filepath.Ext(file) == ".go" {
+					hasGoFiles = true
+					break
+				}
+			}
+			if hasGoFiles {
+				break
+			}
+		}
+
+		var moduleName string
+		if hasGoFiles {
+			if *goBaseFlag != "" {
+				moduleName = strings.TrimSpace(*goBaseFlag)
+			} else {
+				var err error
+				moduleName, err = getGoModuleName()
+				if err != nil {
+					if os.IsNotExist(err) {
+						moduleName = ""
+					} else {
+						log.Fatalf("Error reading go.mod: %v", err)
+					}
+				}
+			}
+		} else {
+			moduleName = ""
 		}
 
 		var buf bytes.Buffer
@@ -154,11 +172,7 @@ func main() {
 			if err != nil {
 				log.Fatalf("Error opening input file %q: %v", *inputFile, err)
 			}
-			defer func() {
-				if err := f.Close(); err != nil {
-					log.Printf("Error closing input file: %v", err)
-				}
-			}()
+			defer f.Close()
 			in = f
 		} else {
 			in = os.Stdin
@@ -179,8 +193,6 @@ func main() {
 	}
 }
 
-// getModuleNameForUpdater retrieves the module path from the build info.
-// This is used exclusively by the update checker.
 func getModuleNameForUpdater() (string, error) {
 	bi, ok := debug.ReadBuildInfo()
 	if !ok {
@@ -192,8 +204,6 @@ func getModuleNameForUpdater() (string, error) {
 	return bi.Main.Path, nil
 }
 
-// getGoModuleName reads the Go module name from the go.mod file in the current directory.
-// This is used for processing files.
 func getGoModuleName() (string, error) {
 	data, err := os.ReadFile("go.mod")
 	if err != nil {
@@ -212,7 +222,6 @@ func getGoModuleName() (string, error) {
 	return "", fmt.Errorf("module name not found in go.mod")
 }
 
-// getJavaModuleName attempts to extract the base package (group) from common Java build files.
 func getJavaModuleName() (string, error) {
 	if _, err := os.Stat("pom.xml"); err == nil {
 		data, err := os.ReadFile("pom.xml")
@@ -253,33 +262,10 @@ func getJavaModuleName() (string, error) {
 	return "", fmt.Errorf("no recognized Java build file found")
 }
 
-// getDartModuleName attempts to extract the Dart package name from pubspec.yaml.
-func getDartModuleName() (string, error) {
-	if _, err := os.Stat("pubspec.yaml"); err == nil {
-		data, err := os.ReadFile("pubspec.yaml")
-		if err != nil {
-			return "", err
-		}
-		// Look for a line like: name: my_package
-		re := regexp.MustCompile(`(?m)^\s*name:\s*(\S+)\s*$`)
-		matches := re.FindSubmatch(data)
-		if len(matches) >= 2 {
-			return string(matches[1]), nil
-		}
-		return "", fmt.Errorf("package name not found in pubspec.yaml")
-	}
-	return "", fmt.Errorf("pubspec.yaml not found")
-}
-
-// checkForUpdates queries GitHub for the latest release and prints a banner with release notes
-// if the current version is outdated. It derives the repository info from the module name.
 func checkForUpdates(moduleName string) {
-	// Do not run update checks for dev builds
 	if version == "dev" {
 		return
 	}
-
-	// Expect moduleName in the form "github.com/username/reponame"
 	if !strings.HasPrefix(moduleName, "github.com/") {
 		log.Printf("Update check skipped: module %q is not hosted on GitHub", moduleName)
 		return
@@ -291,7 +277,7 @@ func checkForUpdates(moduleName string) {
 	}
 	repoOwner := parts[1]
 	repoName := parts[2]
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName) // #nosec G107
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName)
 	resp, err := http.Get(url)
 	if err != nil {
 		log.Printf("Update check failed: %v", err)
@@ -327,7 +313,6 @@ func checkForUpdates(moduleName string) {
 	}
 }
 
-// isExcludedFile checks if the file (by its relative path) matches any exclusion pattern.
 func isExcludedFile(relPath string) bool {
 	for _, pattern := range excludeFiles {
 		if match, err := filepath.Match(pattern, relPath); err == nil && match {
@@ -337,13 +322,10 @@ func isExcludedFile(relPath string) bool {
 	return false
 }
 
-// processFile processes any file. For Go, Java, Kotlin, or Dart files, it handles them recursively.
-// The output is written to w.
 func processFile(filePath, moduleName string, processed map[string]bool, w io.Writer) error {
 	filePath = filepath.Clean(filePath)
 	if _, err := os.Stat(filePath); err != nil {
 		if os.IsNotExist(err) {
-			log.Printf("File not found: %s", filePath)
 			return nil
 		}
 		return err
@@ -352,7 +334,11 @@ func processFile(filePath, moduleName string, processed map[string]bool, w io.Wr
 	if err != nil {
 		return err
 	}
-	relPath, err := filepath.Rel(".", absPath)
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "."
+	}
+	relPath, err := filepath.Rel(cwd, absPath)
 	if err != nil {
 		relPath = filePath
 	}
@@ -384,13 +370,12 @@ func processFile(filePath, moduleName string, processed map[string]bool, w io.Wr
 	case ".kt", ".kts":
 		return processKotlinFile(filePath, javaBase, processed, w)
 	case ".dart":
-		return processDartFile(filePath, dartBase, processed, w)
+		return processDartFile(filePath, "", processed, w)
 	default:
 		return processNonSourceFile(filePath, w)
 	}
 }
 
-// getGoPackageName parses the Go file to extract its package declaration.
 func getGoPackageName(filePath string) (string, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, filePath, nil, parser.PackageClauseOnly)
@@ -400,14 +385,17 @@ func getGoPackageName(filePath string) (string, error) {
 	return f.Name.Name, nil
 }
 
-// processGoFile processes a Go source file.
 func processGoFile(filePath, moduleName string, processed map[string]bool, w io.Writer) error {
 	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
 		return err
 	}
-	relPath, err := filepath.Rel(".", absPath)
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "."
+	}
+	relPath, err := filepath.Rel(cwd, absPath)
 	if err != nil {
 		relPath = filePath
 	}
@@ -429,15 +417,12 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 		log.Printf("Error closing file %s: %v", filePath, err)
 	}
 	fmt.Fprintf(w, fileEndFormat, relPath)
+
 	f2, err := os.Open(filePath)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if cerr := f2.Close(); cerr != nil {
-			log.Printf("Error closing file %s: %v", filePath, cerr)
-		}
-	}()
+	defer f2.Close()
 	fset := token.NewFileSet()
 	parsed, err := parser.ParseFile(fset, filePath, f2, parser.ImportsOnly)
 	if err != nil {
@@ -459,7 +444,7 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 		} else {
 			continue
 		}
-		packageDir := filepath.Join(".", relDir)
+		packageDir := filepath.Join(cwd, relDir)
 		packageDir = filepath.Clean(packageDir)
 		entries, err := os.ReadDir(packageDir)
 		if err != nil {
@@ -480,9 +465,7 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 	return nil
 }
 
-// processJavaFile processes a Java source file.
 func processJavaFile(filePath, base string, processed map[string]bool, w io.Writer) error {
-	// Auto-detect base only if needed.
 	if base == "" {
 		if jb, err := getJavaModuleName(); err == nil {
 			base = jb
@@ -495,7 +478,11 @@ func processJavaFile(filePath, base string, processed map[string]bool, w io.Writ
 	if err != nil {
 		return err
 	}
-	relPath, err := filepath.Rel(".", absPath)
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "."
+	}
+	relPath, err := filepath.Rel(cwd, absPath)
 	if err != nil {
 		relPath = filePath
 	}
@@ -517,6 +504,7 @@ func processJavaFile(filePath, base string, processed map[string]bool, w io.Writ
 		log.Printf("Error closing file %s: %v", filePath, err)
 	}
 	fmt.Fprintf(w, fileEndFormat, relPath)
+
 	f2, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -539,7 +527,7 @@ func processJavaFile(filePath, base string, processed map[string]bool, w io.Writ
 				relDir = strings.TrimPrefix(importPath, base+".")
 				relDir = filepath.FromSlash(strings.ReplaceAll(relDir, ".", "/"))
 			}
-			packageDir := filepath.Join(".", relDir)
+			packageDir := filepath.Join(cwd, relDir)
 			packageDir = filepath.Clean(packageDir)
 			entries, err := os.ReadDir(packageDir)
 			if err != nil {
@@ -567,9 +555,7 @@ func processJavaFile(filePath, base string, processed map[string]bool, w io.Writ
 	return nil
 }
 
-// processKotlinFile processes a Kotlin source file (.kt or .kts).
 func processKotlinFile(filePath, base string, processed map[string]bool, w io.Writer) error {
-	// Auto-detect base if not provided.
 	if base == "" {
 		if jb, err := getJavaModuleName(); err == nil {
 			base = jb
@@ -582,7 +568,11 @@ func processKotlinFile(filePath, base string, processed map[string]bool, w io.Wr
 	if err != nil {
 		return err
 	}
-	relPath, err := filepath.Rel(".", absPath)
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "."
+	}
+	relPath, err := filepath.Rel(cwd, absPath)
 	if err != nil {
 		relPath = filePath
 	}
@@ -604,6 +594,7 @@ func processKotlinFile(filePath, base string, processed map[string]bool, w io.Wr
 		log.Printf("Error closing file %s: %v", filePath, err)
 	}
 	fmt.Fprintf(w, fileEndFormat, relPath)
+
 	f2, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -626,7 +617,7 @@ func processKotlinFile(filePath, base string, processed map[string]bool, w io.Wr
 				relDir = strings.TrimPrefix(importPath, base+".")
 				relDir = filepath.FromSlash(strings.ReplaceAll(relDir, ".", "/"))
 			}
-			packageDir := filepath.Join(".", relDir)
+			packageDir := filepath.Join(cwd, relDir)
 			packageDir = filepath.Clean(packageDir)
 			entries, err := os.ReadDir(packageDir)
 			if err != nil {
@@ -655,23 +646,17 @@ func processKotlinFile(filePath, base string, processed map[string]bool, w io.Wr
 	return nil
 }
 
-// processDartFile processes a Dart source file.
-func processDartFile(filePath, base string, processed map[string]bool, w io.Writer) error {
-	// Auto-detect Dart base if needed.
-	if base == "" {
-		if db, err := getDartModuleName(); err == nil {
-			base = db
-			dartBase = db
-		} else {
-			log.Printf("Warning: unable to auto-detect Dart base package for %s: %v", filePath, err)
-		}
-	}
+func processDartFile(filePath, _ string, processed map[string]bool, w io.Writer) error {
 	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
 		return err
 	}
-	relPath, err := filepath.Rel(".", absPath)
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "."
+	}
+	relPath, err := filepath.Rel(cwd, absPath)
 	if err != nil {
 		relPath = filePath
 	}
@@ -694,7 +679,6 @@ func processDartFile(filePath, base string, processed map[string]bool, w io.Writ
 	}
 	fmt.Fprintf(w, fileEndFormat, relPath)
 
-	// Process Dart import statements.
 	f2, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -709,21 +693,17 @@ func processDartFile(filePath, base string, processed map[string]bool, w io.Writ
 			continue
 		}
 		importPath := matches[1]
-		// Only process package imports for the current Dart base.
-		prefix := "package:" + base + "/"
-		if !strings.HasPrefix(importPath, prefix) {
+		if strings.HasPrefix(importPath, "dart:") || strings.HasPrefix(importPath, "package:") {
 			continue
 		}
-		// Determine the relative file path in the lib directory.
-		remainder := strings.TrimPrefix(importPath, prefix)
-		fileInPkg := filepath.Join("lib", filepath.FromSlash(remainder))
+		dir := filepath.Dir(filePath)
+		fileInPkg := filepath.Join(dir, importPath)
 		fileInPkg = filepath.Clean(fileInPkg)
 		if _, err := os.Stat(fileInPkg); err != nil {
-			log.Printf("Error reading Dart file %q: %v", fileInPkg, err)
 			continue
 		}
-		if err := processFile(fileInPkg, base, processed, w); err != nil {
-			log.Printf("Error processing %s: %v", fileInPkg, err)
+		if err := processFile(fileInPkg, "", processed, w); err != nil {
+			log.Printf("Error processing relative import file %s: %v", fileInPkg, err)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -732,14 +712,17 @@ func processDartFile(filePath, base string, processed map[string]bool, w io.Writ
 	return nil
 }
 
-// processNonSourceFile outputs a non-source file with header and footer delimiters.
 func processNonSourceFile(filePath string, w io.Writer) error {
 	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
 		return err
 	}
-	relPath, err := filepath.Rel(".", absPath)
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "."
+	}
+	relPath, err := filepath.Rel(cwd, absPath)
 	if err != nil {
 		relPath = filePath
 	}
@@ -764,7 +747,6 @@ func processNonSourceFile(filePath string, w io.Writer) error {
 	return nil
 }
 
-// splitInput reads a joined stream and recreates each file based on the delimiters.
 func splitInput(r io.Reader, outDir string) error {
 	scanner := bufio.NewScanner(r)
 	if !scanner.Scan() {
@@ -783,19 +765,16 @@ func splitInput(r io.Reader, outDir string) error {
 		}
 	}
 	var currentFile *os.File
-	var currentFilename string
 	inFile := false
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, fileStartPrefix) {
 			startQuote := strings.Index(line, "\"")
 			if startQuote == -1 {
-				log.Printf("Invalid header format: %s", line)
 				continue
 			}
 			endQuote := strings.Index(line[startQuote+1:], "\"")
 			if endQuote == -1 {
-				log.Printf("Invalid header format: %s", line)
 				continue
 			}
 			filename := line[startQuote+1 : startQuote+1+endQuote]
@@ -805,38 +784,31 @@ func splitInput(r io.Reader, outDir string) error {
 				filename = filepath.Clean(filename)
 				relToOut, err := filepath.Rel(absOutDir, filename)
 				if err != nil || strings.HasPrefix(relToOut, "..") {
-					log.Printf("Invalid output file path %q; skipping", filename)
 					continue
 				}
 			}
 			if err := os.MkdirAll(filepath.Dir(filename), 0750); err != nil {
-				log.Printf("Error creating directories for %q: %v", filename, err)
 				continue
 			}
 			f, err := os.Create(filename)
 			if err != nil {
-				log.Printf("Error creating file %q: %v", filename, err)
 				continue
 			}
 			currentFile = f
-			currentFilename = filename
 			inFile = true
 			continue
 		}
 		if strings.HasPrefix(line, fileEndPrefix) && inFile {
 			if currentFile != nil {
 				if err := currentFile.Close(); err != nil {
-					log.Printf("Error closing file %q: %v", currentFilename, err)
 				}
 			}
 			currentFile = nil
-			currentFilename = ""
 			inFile = false
 			continue
 		}
 		if inFile && currentFile != nil {
 			if _, err := currentFile.WriteString(line + "\n"); err != nil {
-				log.Printf("Error writing to file %q: %v", currentFilename, err)
 			}
 		}
 	}
@@ -846,7 +818,6 @@ func splitInput(r io.Reader, outDir string) error {
 	return nil
 }
 
-// printGeneralHelp prints the general usage message with the version.
 func printGeneralHelp() {
 	fmt.Printf(`gocat %s
 Usage: %s <command> [options] [arguments]
@@ -862,7 +833,6 @@ For detailed help on a command, run:
 `, version, "gocat", "gocat")
 }
 
-// printSubcommandHelp prints help for a specific subcommand.
 func printSubcommandHelp(cmd string) {
 	switch cmd {
 	case "join":
@@ -872,13 +842,12 @@ Joins the specified source file(s) into a single output stream,
 inserting delimiters between files. For Go files, the tool parses import statements
 and recursively includes files from packages within the same module (as determined by go.mod or -go-base).
 For Java/Kotlin files, if a base package is provided via -java-base (or auto-detected on demand), recursive inclusion is performed.
-For Dart files, if a base package is provided via -dart-base (or auto-detected from pubspec.yaml), the tool will recursively
-include files referenced via package imports (mapped to the lib directory).
+For Dart files, only local (relative) imports are recursively inlined.
 Non-source files are simply included as-is.
 Each file is included only once.
 
 Example:
-  %s join "main.go" "./pkg/*.go" -exclude-packages="expressions,lexer" -exclude-files="vendor/*,testdata/*" -java-base="com.example" -go-base="github.com/example/project" -dart-base="my_package"
+  %s join "lib/main.dart" > a.out
 `, "gocat", "gocat")
 	case "split":
 		fmt.Printf(`Usage: %s split [-in inputfile] [-out outputdirectory]
