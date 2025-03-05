@@ -802,7 +802,7 @@ func splitInput(r io.Reader, outDir string) error {
 			continue
 		}
 		if inFile && currentFile != nil {
-			currentFile.WriteString(line + "\n")
+			_, _ = currentFile.WriteString(line + "\n")
 		}
 	}
 	if err := scanner.Err(); err != nil {
