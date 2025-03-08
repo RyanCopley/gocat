@@ -47,7 +47,28 @@ var (
 
 	// Java base for Java/Kotlin files.
 	javaBase string
+
+	// maxDepth controls recursive import processing.
+	// A value of -1 means unlimited recursion.
+	maxDepth int = -1
 )
+
+// copyFileFiltered reads from r line-by-line and writes to w,
+// filtering out any lines that start with a gocat delimiter.
+func copyFileFiltered(w io.Writer, r io.Reader) error {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, fileStartPrefix) || strings.HasPrefix(line, fileEndPrefix) {
+			continue
+		}
+		// Write the line back with a newline.
+		if _, err := fmt.Fprintln(w, line); err != nil {
+			return err
+		}
+	}
+	return scanner.Err()
+}
 
 func main() {
 	modNameForUpdate, moduleNameError := getModuleNameForUpdater()
@@ -72,6 +93,7 @@ func main() {
 		excludeFilesFlag := joinCmd.String("exclude-files", "", "Comma-separated file patterns to exclude")
 		javaBaseFlag := joinCmd.String("java-base", "", "Base package for Java/Kotlin recursive dependency resolution")
 		goBaseFlag := joinCmd.String("go-base", "", "Base module for Go recursive dependency resolution (overrides go.mod)")
+		depthFlag := joinCmd.Int("depth", -1, "Depth limit for recursive import resolution (-1 for unlimited)")
 		if err := joinCmd.Parse(os.Args[2:]); err != nil {
 			log.Fatalf("Error parsing join command: %v", err)
 		}
@@ -90,6 +112,7 @@ func main() {
 			}
 		}
 		javaBase = strings.TrimSpace(*javaBaseFlag)
+		maxDepth = *depthFlag
 
 		// Determine if any file in the join arguments is a Go file.
 		hasGoFiles := false
@@ -144,7 +167,7 @@ func main() {
 			}
 			for _, file := range matches {
 				file = filepath.Clean(file)
-				if err := processFile(file, moduleName, processed, &buf); err != nil {
+				if err := processFile(file, moduleName, processed, &buf, 0); err != nil {
 					log.Printf("Error processing %s: %v", file, err)
 				}
 			}
@@ -317,7 +340,7 @@ func isExcludedFile(relPath string) bool {
 	return false
 }
 
-func processFile(filePath, moduleName string, processed map[string]bool, w io.Writer) error {
+func processFile(filePath, moduleName string, processed map[string]bool, w io.Writer, depth int) error {
 	filePath = filepath.Clean(filePath)
 	if _, err := os.Stat(filePath); err != nil {
 		if os.IsNotExist(err) {
@@ -359,13 +382,15 @@ func processFile(filePath, moduleName string, processed map[string]bool, w io.Wr
 				}
 			}
 		}
-		return processGoFile(filePath, moduleName, processed, w)
+		return processGoFile(filePath, moduleName, processed, w, depth)
 	case ".java":
-		return processJavaFile(filePath, javaBase, processed, w)
+		return processJavaFile(filePath, javaBase, processed, w, depth)
 	case ".kt", ".kts":
-		return processKotlinFile(filePath, javaBase, processed, w)
+		return processKotlinFile(filePath, javaBase, processed, w, depth)
 	case ".dart":
-		return processDartFile(filePath, "", processed, w)
+		return processDartFile(filePath, "", processed, w, depth)
+	case ".js", ".jsx", ".ts", ".tsx":
+		return processJSFile(filePath, "", processed, w, depth)
 	default:
 		return processNonSourceFile(filePath, w)
 	}
@@ -380,7 +405,7 @@ func getGoPackageName(filePath string) (string, error) {
 	return f.Name.Name, nil
 }
 
-func processGoFile(filePath, moduleName string, processed map[string]bool, w io.Writer) error {
+func processGoFile(filePath, moduleName string, processed map[string]bool, w io.Writer, depth int) error {
 	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
@@ -404,7 +429,7 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(w, f); err != nil {
+	if err := copyFileFiltered(w, f); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -412,6 +437,11 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 		log.Printf("Error closing file %s: %v", filePath, err)
 	}
 	fmt.Fprintf(w, fileEndFormat, relPath)
+
+	// Do not recurse if depth limit has been reached.
+	if maxDepth != -1 && depth >= maxDepth {
+		return nil
+	}
 
 	f2, err := os.Open(filePath)
 	if err != nil {
@@ -452,7 +482,7 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 			}
 			fileInPkg := filepath.Join(packageDir, entry.Name())
 			fileInPkg = filepath.Clean(fileInPkg)
-			if err := processFile(fileInPkg, moduleName, processed, w); err != nil {
+			if err := processFile(fileInPkg, moduleName, processed, w, depth+1); err != nil {
 				log.Printf("Error processing %s: %v", fileInPkg, err)
 			}
 		}
@@ -460,7 +490,7 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 	return nil
 }
 
-func processJavaFile(filePath, base string, processed map[string]bool, w io.Writer) error {
+func processJavaFile(filePath, base string, processed map[string]bool, w io.Writer, depth int) error {
 	if base == "" {
 		if jb, err := getJavaModuleName(); err == nil {
 			base = jb
@@ -491,7 +521,7 @@ func processJavaFile(filePath, base string, processed map[string]bool, w io.Writ
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(w, f); err != nil {
+	if err := copyFileFiltered(w, f); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -499,6 +529,11 @@ func processJavaFile(filePath, base string, processed map[string]bool, w io.Writ
 		log.Printf("Error closing file %s: %v", filePath, err)
 	}
 	fmt.Fprintf(w, fileEndFormat, relPath)
+
+	// Do not recurse if depth limit has been reached.
+	if maxDepth != -1 && depth >= maxDepth {
+		return nil
+	}
 
 	f2, err := os.Open(filePath)
 	if err != nil {
@@ -538,7 +573,7 @@ func processJavaFile(filePath, base string, processed map[string]bool, w io.Writ
 				}
 				fileInPkg := filepath.Join(packageDir, entry.Name())
 				fileInPkg = filepath.Clean(fileInPkg)
-				if err := processFile(fileInPkg, base, processed, w); err != nil {
+				if err := processFile(fileInPkg, base, processed, w, depth+1); err != nil {
 					log.Printf("Error processing %s: %v", fileInPkg, err)
 				}
 			}
@@ -550,7 +585,7 @@ func processJavaFile(filePath, base string, processed map[string]bool, w io.Writ
 	return nil
 }
 
-func processKotlinFile(filePath, base string, processed map[string]bool, w io.Writer) error {
+func processKotlinFile(filePath, base string, processed map[string]bool, w io.Writer, depth int) error {
 	if base == "" {
 		if jb, err := getJavaModuleName(); err == nil {
 			base = jb
@@ -581,7 +616,7 @@ func processKotlinFile(filePath, base string, processed map[string]bool, w io.Wr
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(w, f); err != nil {
+	if err := copyFileFiltered(w, f); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -589,6 +624,11 @@ func processKotlinFile(filePath, base string, processed map[string]bool, w io.Wr
 		log.Printf("Error closing file %s: %v", filePath, err)
 	}
 	fmt.Fprintf(w, fileEndFormat, relPath)
+
+	// Do not recurse if depth limit has been reached.
+	if maxDepth != -1 && depth >= maxDepth {
+		return nil
+	}
 
 	f2, err := os.Open(filePath)
 	if err != nil {
@@ -629,7 +669,7 @@ func processKotlinFile(filePath, base string, processed map[string]bool, w io.Wr
 				}
 				fileInPkg := filepath.Join(packageDir, entry.Name())
 				fileInPkg = filepath.Clean(fileInPkg)
-				if err := processFile(fileInPkg, base, processed, w); err != nil {
+				if err := processFile(fileInPkg, base, processed, w, depth+1); err != nil {
 					log.Printf("Error processing %s: %v", fileInPkg, err)
 				}
 			}
@@ -641,7 +681,7 @@ func processKotlinFile(filePath, base string, processed map[string]bool, w io.Wr
 	return nil
 }
 
-func processDartFile(filePath, _ string, processed map[string]bool, w io.Writer) error {
+func processDartFile(filePath, _ string, processed map[string]bool, w io.Writer, depth int) error {
 	filePath = filepath.Clean(filePath)
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
@@ -665,7 +705,7 @@ func processDartFile(filePath, _ string, processed map[string]bool, w io.Writer)
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(w, f); err != nil {
+	if err := copyFileFiltered(w, f); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -673,6 +713,11 @@ func processDartFile(filePath, _ string, processed map[string]bool, w io.Writer)
 		log.Printf("Error closing file %s: %v", filePath, err)
 	}
 	fmt.Fprintf(w, fileEndFormat, relPath)
+
+	// Do not recurse if depth limit has been reached.
+	if maxDepth != -1 && depth >= maxDepth {
+		return nil
+	}
 
 	f2, err := os.Open(filePath)
 	if err != nil {
@@ -697,7 +742,102 @@ func processDartFile(filePath, _ string, processed map[string]bool, w io.Writer)
 		if _, err := os.Stat(fileInPkg); err != nil {
 			continue
 		}
-		if err := processFile(fileInPkg, "", processed, w); err != nil {
+		if err := processFile(fileInPkg, "", processed, w, depth+1); err != nil {
+			log.Printf("Error processing relative import file %s: %v", fileInPkg, err)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func processJSFile(filePath, _ string, processed map[string]bool, w io.Writer, depth int) error {
+	filePath = filepath.Clean(filePath)
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return err
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "."
+	}
+	relPath, err := filepath.Rel(cwd, absPath)
+	if err != nil {
+		relPath = filePath
+	}
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return err
+	}
+	modTime := info.ModTime().Format(time.RFC3339)
+	fmt.Fprintf(w, fileStartFormat, relPath, info.Size(), modTime)
+	f, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	if err := copyFileFiltered(w, f); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		log.Printf("Error closing file %s: %v", filePath, err)
+	}
+	fmt.Fprintf(w, fileEndFormat, relPath)
+
+	// Do not recurse if depth limit has been reached.
+	if maxDepth != -1 && depth >= maxDepth {
+		return nil
+	}
+
+	f2, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer f2.Close()
+	scanner := bufio.NewScanner(f2)
+	// Regex for ES6 import statements (with or without "from") and CommonJS require calls.
+	importRegex := regexp.MustCompile(`^\s*import(?:\s+.*\s+from)?\s+['"]([^'"]+)['"]`)
+	requireRegex := regexp.MustCompile(`\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)`)
+	for scanner.Scan() {
+		line := scanner.Text()
+		var importPath string
+		if matches := importRegex.FindStringSubmatch(line); len(matches) >= 2 {
+			importPath = matches[1]
+		} else if matches := requireRegex.FindStringSubmatch(line); len(matches) >= 2 {
+			importPath = matches[1]
+		}
+		if importPath == "" {
+			continue
+		}
+		// Process only relative imports (those starting with ".")
+		if !strings.HasPrefix(importPath, ".") {
+			continue
+		}
+		dir := filepath.Dir(filePath)
+		fileInPkg := filepath.Join(dir, importPath)
+		fileInPkg = filepath.Clean(fileInPkg)
+		// If the file doesn't exist, and no extension was provided, try common JS/TS extensions.
+		if _, err := os.Stat(fileInPkg); os.IsNotExist(err) {
+			if filepath.Ext(fileInPkg) == "" {
+				extensions := []string{".js", ".jsx", ".ts", ".tsx"}
+				found := false
+				for _, ext := range extensions {
+					candidate := fileInPkg + ext
+					if _, err := os.Stat(candidate); err == nil {
+						fileInPkg = candidate
+						found = true
+						break
+					}
+				}
+				if !found {
+					continue
+				}
+			} else {
+				continue
+			}
+		}
+		if err := processFile(fileInPkg, "", processed, w, depth+1); err != nil {
 			log.Printf("Error processing relative import file %s: %v", fileInPkg, err)
 		}
 	}
@@ -731,7 +871,7 @@ func processNonSourceFile(filePath string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(w, f); err != nil {
+	if err := copyFileFiltered(w, f); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -835,8 +975,7 @@ Joins the specified source file(s) into a single output stream,
 inserting delimiters between files. For Go files, the tool parses import statements
 and recursively includes files from packages within the same module (as determined by go.mod or -go-base).
 For Java/Kotlin files, if a base package is provided via -java-base (or auto-detected on demand), recursive inclusion is performed.
-For Dart files, only local (relative) imports are recursively inlined.
-Non-source files are simply included as-is.
+For Dart, JavaScript, and TypeScript files, only local (relative) imports are recursively inlined.
 Each file is included only once.
 
 Example:
