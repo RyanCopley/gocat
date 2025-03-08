@@ -53,6 +53,23 @@ var (
 	maxDepth int = -1
 )
 
+// copyFileFiltered reads from r line-by-line and writes to w,
+// filtering out any lines that start with a gocat delimiter.
+func copyFileFiltered(w io.Writer, r io.Reader) error {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, fileStartPrefix) || strings.HasPrefix(line, fileEndPrefix) {
+			continue
+		}
+		// Write the line back with a newline.
+		if _, err := fmt.Fprintln(w, line); err != nil {
+			return err
+		}
+	}
+	return scanner.Err()
+}
+
 func main() {
 	modNameForUpdate, moduleNameError := getModuleNameForUpdater()
 
@@ -412,7 +429,7 @@ func processGoFile(filePath, moduleName string, processed map[string]bool, w io.
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(w, f); err != nil {
+	if err := copyFileFiltered(w, f); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -504,7 +521,7 @@ func processJavaFile(filePath, base string, processed map[string]bool, w io.Writ
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(w, f); err != nil {
+	if err := copyFileFiltered(w, f); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -599,7 +616,7 @@ func processKotlinFile(filePath, base string, processed map[string]bool, w io.Wr
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(w, f); err != nil {
+	if err := copyFileFiltered(w, f); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -688,7 +705,7 @@ func processDartFile(filePath, _ string, processed map[string]bool, w io.Writer,
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(w, f); err != nil {
+	if err := copyFileFiltered(w, f); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -759,7 +776,7 @@ func processJSFile(filePath, _ string, processed map[string]bool, w io.Writer, d
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(w, f); err != nil {
+	if err := copyFileFiltered(w, f); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -854,7 +871,7 @@ func processNonSourceFile(filePath string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(w, f); err != nil {
+	if err := copyFileFiltered(w, f); err != nil {
 		_ = f.Close()
 		return err
 	}
